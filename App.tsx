@@ -158,6 +158,10 @@ const App: React.FC = () => {
     setProjects(prev => prev.map(p => p.id === activeProjectId ? { ...p, boxes } : p));
   };
 
+  const updateProjectBoxesById = (projectId: string, boxes: Box[]) => {
+    setProjects(prev => prev.map(p => p.id === projectId ? { ...p, boxes } : p));
+  };
+
   const setImageForProject = (url: string | undefined, w: number, h: number) => {
     if (!activeProjectId) return;
     setProjects(prev => prev.map(p => p.id === activeProjectId ? { ...p, imageUrl: url, imageWidth: w, imageHeight: h } : p));
@@ -268,8 +272,11 @@ const App: React.FC = () => {
               setCols={setCols}
               onReorder={handleReorderMerge}
               onDoubleClick={navigateToEditor}
+              onProjectUpdate={updateProjectBoxesById}
               boxOpacity={boxOpacity}
+              setBoxOpacity={setBoxOpacity}
               showLabels={showLabels}
+              setShowLabels={setShowLabels}
             />
           )}
         </div>
