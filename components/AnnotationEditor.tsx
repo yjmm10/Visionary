@@ -1,5 +1,5 @@
 
-import React, { useRef, useState, useEffect } from 'react';
+import React, { useRef, useState, useEffect, useCallback } from 'react';
 import { Project, Box } from '../types';
 import { Icons, COLORS } from '../constants';
 import { ZoomIn, ZoomOut, Maximize, Eye, EyeOff, Hand, MousePointer2, RefreshCw, Square, PlusSquare } from 'lucide-react';
@@ -49,6 +49,29 @@ const AnnotationEditor: React.FC<AnnotationEditorProps> = ({
   } | null>(null);
 
   const [panStart, setPanStart] = useState<{ x: number, y: number } | null>(null);
+
+  const fitToView = useCallback(() => {
+    if (containerRef.current && project.imageWidth > 0 && project.imageHeight > 0) {
+      const cw = containerRef.current.clientWidth - 64;
+      const ch = containerRef.current.clientHeight - 64;
+      if (cw > 0 && ch > 0) {
+        const scaleX = cw / project.imageWidth;
+        const scaleY = ch / project.imageHeight;
+        const newZoom = Math.min(scaleX, scaleY);
+        setZoom(parseFloat(newZoom.toFixed(4)));
+        setOffset({ x: 0, y: 0 });
+      }
+    }
+  }, [project.imageWidth, project.imageHeight]);
+
+  // Initial Fit to Screen when project loads
+  useEffect(() => {
+    // Small timeout ensures container is rendered and has dimensions
+    const timer = setTimeout(() => {
+      fitToView();
+    }, 10);
+    return () => clearTimeout(timer);
+  }, [project.id, fitToView]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -109,14 +132,6 @@ const AnnotationEditor: React.FC<AnnotationEditorProps> = ({
   const getCanvasCoords = (clientX: number, clientY: number) => {
     if (!canvasRef.current) return null;
     const rect = canvasRef.current.getBoundingClientRect();
-    // Since the canvasRef div is transformed by scale(${zoom}), 
-    // getBoundingClientRect returns the scaled dimensions.
-    // To get the internal coordinate, we divide by the visual scale ratio.
-    
-    // Calculate the effective scale factor currently rendered
-    // rect.width is the rendered width on screen
-    // project.imageWidth is the internal width
-    // scale = rect.width / project.imageWidth
     const scale = rect.width / project.imageWidth;
     
     return {
@@ -132,7 +147,8 @@ const AnnotationEditor: React.FC<AnnotationEditorProps> = ({
       const img = new Image();
       img.onload = () => {
         onImageSet(url, img.naturalWidth, img.naturalHeight);
-        resetView();
+        // We can trigger fitToView here effectively by updating props which triggers the effect, 
+        // or just rely on imageWidth/Height change triggering the callback dependency and effect.
       };
       img.src = url;
     }
@@ -140,7 +156,7 @@ const AnnotationEditor: React.FC<AnnotationEditorProps> = ({
 
   const initializeBlank = () => {
     onImageSet(undefined, customWidth, customHeight);
-    resetView();
+    // State update will trigger effect
   };
 
   const updateBox = (id: string, updates: Partial<Box>) => {
@@ -154,7 +170,6 @@ const AnnotationEditor: React.FC<AnnotationEditorProps> = ({
   };
 
   const startDragging = (e: React.MouseEvent, id: string, type: 'move' | 'handle', handleIndex?: number) => {
-    // If drawing or panning, allow event to bubble to container
     if (tool === 'hand' || tool === 'draw') return;
     
     e.stopPropagation();
@@ -183,7 +198,6 @@ const AnnotationEditor: React.FC<AnnotationEditorProps> = ({
             setIsDrawing(true);
             setDrawStart(coords);
             setCurrentDrawRect({ x1: coords.x, y1: coords.y, x2: coords.x, y2: coords.y });
-            // Deselect existing
             setSelectedBoxId(null);
         }
     }
@@ -213,7 +227,6 @@ const AnnotationEditor: React.FC<AnnotationEditorProps> = ({
 
     if (!dragInfo) return;
     
-    // Logic for moving/resizing existing boxes
     const visualScale = project.imageUrl ? getVisualScale() : zoom;
     const dx = (e.clientX - dragInfo.startPos.x) / visualScale;
     const dy = (e.clientY - dragInfo.startPos.y) / visualScale;
@@ -235,13 +248,11 @@ const AnnotationEditor: React.FC<AnnotationEditorProps> = ({
 
   const onMouseUp = () => {
     if (isDrawing && currentDrawRect) {
-        // Finalize new box
         const xMin = Math.min(currentDrawRect.x1, currentDrawRect.x2);
         const yMin = Math.min(currentDrawRect.y1, currentDrawRect.y2);
         const xMax = Math.max(currentDrawRect.x1, currentDrawRect.x2);
         const yMax = Math.max(currentDrawRect.y1, currentDrawRect.y2);
 
-        // Minimum size threshold (e.g., 5x5 px)
         if ((xMax - xMin) > 5 && (yMax - yMin) > 5) {
             const newBox: Box = {
                 id: `box-new-${Date.now()}-${Math.random().toString(36).substr(2,4)}`,
@@ -268,21 +279,8 @@ const AnnotationEditor: React.FC<AnnotationEditorProps> = ({
     setOffset({ x: 0, y: 0 });
   };
 
-  const fitToView = () => {
-    if (containerRef.current && project.imageWidth) {
-      const cw = containerRef.current.clientWidth - 64;
-      const ch = containerRef.current.clientHeight - 64;
-      const scaleX = cw / project.imageWidth;
-      const scaleY = ch / project.imageHeight;
-      const newZoom = Math.min(scaleX, scaleY);
-      setZoom(newZoom);
-      setOffset({ x: 0, y: 0 });
-    }
-  };
-
   const hasCanvas = project.imageWidth > 0 && project.imageHeight > 0;
   
-  // Cursor Logic
   let cursorClass = 'cursor-default';
   if (tool === 'hand') cursorClass = isPanning ? 'cursor-grabbing' : 'cursor-grab';
   else if (tool === 'draw') cursorClass = 'cursor-crosshair';
@@ -417,7 +415,7 @@ const AnnotationEditor: React.FC<AnnotationEditorProps> = ({
                         <circle 
                           key={hidx}
                           cx={hx} cy={hy} 
-                          r={6 / zoom} // Scale handle size inversely to zoom for visibility
+                          r={6 / zoom}
                           fill="white" 
                           stroke={color} 
                           strokeWidth={2}
@@ -443,7 +441,6 @@ const AnnotationEditor: React.FC<AnnotationEditorProps> = ({
                   );
                 })}
 
-                {/* Draw Preview Box */}
                 {isDrawing && currentDrawRect && (
                     <rect
                         x={Math.min(currentDrawRect.x1, currentDrawRect.x2)}
