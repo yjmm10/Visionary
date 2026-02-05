@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect } from 'react';
-import { Project, LayoutFormat, Box } from './types';
-import { Icons, LAYOUT_CONFIGS } from './constants';
+import { Project, Box } from './types';
+import { Icons } from './constants';
 import Sidebar from './components/Sidebar';
 import AnnotationEditor from './components/AnnotationEditor';
 import MergeWorkspace from './components/MergeWorkspace';
@@ -12,9 +12,11 @@ const App: React.FC = () => {
   const [projects, setProjects] = useState<Project[]>([]);
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
   const [mergeQueue, setMergeQueue] = useState<(string | null)[]>([]);
-  const [layoutFormat, setLayoutFormat] = useState<LayoutFormat>('2x2');
-  const [customRows, setCustomRows] = useState(2);
-  const [customCols, setCustomCols] = useState(2);
+  
+  // Layout State (Defaults to 3x3 now)
+  const [rows, setRows] = useState(3);
+  const [cols, setCols] = useState(3);
+  
   const [view, setView] = useState<'editor' | 'merge'>('editor');
   
   // Shared Visual State
@@ -32,9 +34,10 @@ const App: React.FC = () => {
         const parsed = JSON.parse(saved);
         setProjects(parsed.projects || []);
         setMergeQueue(parsed.mergeQueue || []);
-        setLayoutFormat(parsed.layoutFormat || '2x2');
-        setCustomRows(parsed.customRows || 2);
-        setCustomCols(parsed.customCols || 2);
+        // Load rows/cols if they exist, otherwise default to 3x3
+        setRows(parsed.rows || 3);
+        setCols(parsed.cols || 3);
+        
         if (parsed.boxOpacity !== undefined) setBoxOpacity(parsed.boxOpacity);
         if (parsed.showLabels !== undefined) setShowLabels(parsed.showLabels);
       } catch (e) {
@@ -44,9 +47,9 @@ const App: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    const state = { projects, mergeQueue, layoutFormat, customRows, customCols, boxOpacity, showLabels };
+    const state = { projects, mergeQueue, rows, cols, boxOpacity, showLabels };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-  }, [projects, mergeQueue, layoutFormat, customRows, customCols, boxOpacity, showLabels]);
+  }, [projects, mergeQueue, rows, cols, boxOpacity, showLabels]);
 
   // Global Keyboard Shortcuts for Copy/Paste
   useEffect(() => {
@@ -105,11 +108,7 @@ const App: React.FC = () => {
           
           // Auto-add copy to merge queue if space exists
           setMergeQueue(prev => {
-            const config = layoutFormat === 'custom' 
-              ? { rows: customRows, cols: customCols } 
-              : LAYOUT_CONFIGS[layoutFormat];
-            const totalSlots = config.rows * config.cols;
-
+            const totalSlots = rows * cols;
             const next = [...prev];
             while (next.length < totalSlots) next.push(null);
 
@@ -125,7 +124,7 @@ const App: React.FC = () => {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [activeProjectId, clipboard, projects, layoutFormat, customRows, customCols]);
+  }, [activeProjectId, clipboard, projects, rows, cols]);
 
   const activeProject = projects.find(p => p.id === activeProjectId);
 
@@ -137,13 +136,9 @@ const App: React.FC = () => {
 
     // Auto-add newly uploaded projects to available slots in Merge Queue
     setMergeQueue(prev => {
-      const config = layoutFormat === 'custom' 
-        ? { rows: customRows, cols: customCols } 
-        : LAYOUT_CONFIGS[layoutFormat];
-      const totalSlots = config.rows * config.cols;
-
+      const totalSlots = rows * cols;
       const next = [...prev];
-      // Ensure array is at least totalSlots long (in case it hasn't been initialized by MergeWorkspace yet)
+      // Ensure array is at least totalSlots long
       while (next.length < totalSlots) next.push(null);
 
       let pIdx = 0;
@@ -267,12 +262,10 @@ const App: React.FC = () => {
             <MergeWorkspace 
               projects={projects}
               mergeQueue={mergeQueue}
-              layout={layoutFormat}
-              customRows={customRows}
-              customCols={customCols}
-              setLayout={setLayoutFormat}
-              setCustomRows={setCustomRows}
-              setCustomCols={setCustomCols}
+              rows={rows}
+              cols={cols}
+              setRows={setRows}
+              setCols={setCols}
               onReorder={handleReorderMerge}
               onDoubleClick={navigateToEditor}
               boxOpacity={boxOpacity}

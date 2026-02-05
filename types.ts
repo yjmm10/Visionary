@@ -17,15 +17,12 @@ export interface Project {
   imageHeight: number;
 }
 
-export type LayoutFormat = '1x1' | '1x2' | '2x1' | '2x2' | '3x2' | '2x3' | 'custom';
-
 export interface AppState {
   projects: Project[];
   activeProjectId: string | null;
   mergeQueue: (string | null)[]; // IDs of projects in the merge view slots
-  layoutFormat: LayoutFormat;
-  customRows: number;
-  customCols: number;
+  rows: number;
+  cols: number;
   boxOpacity: number;
   showLabels: boolean;
 }

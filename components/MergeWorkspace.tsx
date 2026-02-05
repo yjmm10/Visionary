@@ -1,18 +1,16 @@
 
 import React, { useRef, useState, useEffect, useMemo } from 'react';
-import { Project, LayoutFormat } from '../types';
-import { Icons, LAYOUT_CONFIGS, COLORS } from '../constants';
+import { Project } from '../types';
+import { Icons, COLORS } from '../constants';
 import html2canvas from 'html2canvas';
 
 interface MergeWorkspaceProps {
   projects: Project[];
   mergeQueue: (string | null)[];
-  layout: LayoutFormat;
-  customRows: number;
-  customCols: number;
-  setLayout: (l: LayoutFormat) => void;
-  setCustomRows: (r: number) => void;
-  setCustomCols: (c: number) => void;
+  rows: number;
+  cols: number;
+  setRows: (r: number) => void;
+  setCols: (c: number) => void;
   onReorder: (ids: (string | null)[]) => void;
   onDoubleClick: (id: string) => void;
   boxOpacity: number;
@@ -22,12 +20,10 @@ interface MergeWorkspaceProps {
 const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({ 
   projects, 
   mergeQueue, 
-  layout, 
-  customRows, 
-  customCols,
-  setLayout,
-  setCustomRows,
-  setCustomCols,
+  rows, 
+  cols,
+  setRows,
+  setCols,
   onReorder,
   onDoubleClick,
   boxOpacity,
@@ -40,7 +36,6 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
   const [copying, setCopying] = useState(false);
   const [scale, setScale] = useState(1);
 
-  const { rows, cols } = layout === 'custom' ? { rows: customRows, cols: customCols } : LAYOUT_CONFIGS[layout];
   const totalSlots = rows * cols;
 
   // 1. Calculate Strict Pixel Metrics based on the FIRST image (Reference)
@@ -264,41 +259,29 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
       {/* Toolbar */}
       <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 shrink-0 bg-white p-4 rounded-xl border border-slate-200 shadow-sm z-20">
         <div className="flex items-center gap-6">
-          <div className="flex flex-col">
-            <label className="text-[10px] font-bold text-slate-500 uppercase mb-1">Layout Preset</label>
-            <select 
-              value={layout} 
-              onChange={(e) => setLayout(e.target.value as LayoutFormat)}
-              className="bg-white border border-slate-300 rounded px-3 py-1.5 text-xs font-bold text-slate-900 outline-none focus:ring-2 focus:ring-blue-500/20 shadow-sm"
-            >
-              {Object.keys(LAYOUT_CONFIGS).map(k => (
-                <option key={k} value={k}>{k.toUpperCase()}</option>
-              ))}
-            </select>
+          <div className="flex items-center gap-4">
+             <div className="flex items-center gap-2 bg-slate-50 p-1.5 rounded-lg border border-slate-200">
+                <div className="flex flex-col px-1">
+                    <label className="text-[9px] font-bold text-slate-500 uppercase tracking-wider">Rows</label>
+                    <input 
+                    type="number" min="1" max="10" 
+                    value={rows} 
+                    onChange={(e) => setRows(Math.max(1, parseInt(e.target.value) || 1))}
+                    className="w-12 bg-transparent text-sm font-bold text-slate-900 outline-none"
+                    />
+                </div>
+                <div className="h-6 w-px bg-slate-200" />
+                <div className="flex flex-col px-1">
+                    <label className="text-[9px] font-bold text-slate-500 uppercase tracking-wider">Cols</label>
+                    <input 
+                    type="number" min="1" max="10" 
+                    value={cols} 
+                    onChange={(e) => setCols(Math.max(1, parseInt(e.target.value) || 1))}
+                    className="w-12 bg-transparent text-sm font-bold text-slate-900 outline-none"
+                    />
+                </div>
+             </div>
           </div>
-
-          {layout === 'custom' && (
-            <div className="flex items-center gap-4 animate-in fade-in slide-in-from-left-2 duration-300">
-              <div className="flex flex-col">
-                <label className="text-[10px] font-bold text-slate-500 uppercase mb-1">Rows</label>
-                <input 
-                  type="number" min="1" max="10" 
-                  value={customRows} 
-                  onChange={(e) => setCustomRows(parseInt(e.target.value) || 1)}
-                  className="w-16 bg-white border border-slate-300 rounded px-2 py-1.5 text-xs font-bold text-slate-900 shadow-sm outline-none"
-                />
-              </div>
-              <div className="flex flex-col">
-                <label className="text-[10px] font-bold text-slate-500 uppercase mb-1">Cols</label>
-                <input 
-                  type="number" min="1" max="10" 
-                  value={customCols} 
-                  onChange={(e) => setCustomCols(parseInt(e.target.value) || 1)}
-                  className="w-16 bg-white border border-slate-300 rounded px-2 py-1.5 text-xs font-bold text-slate-900 shadow-sm outline-none"
-                />
-              </div>
-            </div>
-          )}
           
           <div className="h-8 w-px bg-slate-200 hidden lg:block" />
           
