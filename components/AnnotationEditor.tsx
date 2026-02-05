@@ -2,7 +2,7 @@
 import React, { useRef, useState, useEffect } from 'react';
 import { Project, Box } from '../types';
 import { Icons, COLORS } from '../constants';
-import { ZoomIn, ZoomOut, Maximize, Eye, EyeOff, Hand, MousePointer2, RefreshCw, Square } from 'lucide-react';
+import { ZoomIn, ZoomOut, Maximize, Eye, EyeOff, Hand, MousePointer2, RefreshCw, Square, PlusSquare } from 'lucide-react';
 
 interface AnnotationEditorProps {
   project: Project;
@@ -24,13 +24,19 @@ const AnnotationEditor: React.FC<AnnotationEditorProps> = ({
   setShowLabels
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
+  const canvasRef = useRef<HTMLDivElement>(null);
   const imgRef = useRef<HTMLImageElement>(null);
   const [selectedBoxId, setSelectedBoxId] = useState<string | null>(null);
   const [zoom, setZoom] = useState(1);
   const [offset, setOffset] = useState({ x: 0, y: 0 });
-  const [tool, setTool] = useState<'select' | 'hand'>('select');
+  const [tool, setTool] = useState<'select' | 'hand' | 'draw'>('select');
   const [isPanning, setIsPanning] = useState(false);
   
+  // Drawing State
+  const [isDrawing, setIsDrawing] = useState(false);
+  const [drawStart, setDrawStart] = useState<{ x: number, y: number } | null>(null);
+  const [currentDrawRect, setCurrentDrawRect] = useState<{ x1: number, y1: number, x2: number, y2: number } | null>(null);
+
   const [customWidth, setCustomWidth] = useState(project.imageWidth || 1224);
   const [customHeight, setCustomHeight] = useState(project.imageHeight || 1584);
 
@@ -46,9 +52,18 @@ const AnnotationEditor: React.FC<AnnotationEditorProps> = ({
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.code === 'Space' && tool !== 'hand' && document.activeElement?.tagName !== 'INPUT') {
+      if (document.activeElement?.tagName === 'INPUT') return;
+      
+      if (e.code === 'Space' && tool !== 'hand') {
         e.preventDefault();
         setTool('hand');
+      }
+      if (e.key.toLowerCase() === 'v') setTool('select');
+      if (e.key.toLowerCase() === 'd') setTool('draw');
+      
+      // Delete shortcut
+      if ((e.key === 'Delete' || e.key === 'Backspace') && selectedBoxId) {
+         deleteBox(selectedBoxId);
       }
     };
     const handleKeyUp = (e: KeyboardEvent) => {
@@ -62,7 +77,7 @@ const AnnotationEditor: React.FC<AnnotationEditorProps> = ({
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
     };
-  }, [tool]);
+  }, [tool, selectedBoxId]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -89,6 +104,25 @@ const AnnotationEditor: React.FC<AnnotationEditorProps> = ({
       return rect.width / project.imageWidth;
     }
     return zoom; 
+  };
+
+  const getCanvasCoords = (clientX: number, clientY: number) => {
+    if (!canvasRef.current) return null;
+    const rect = canvasRef.current.getBoundingClientRect();
+    // Since the canvasRef div is transformed by scale(${zoom}), 
+    // getBoundingClientRect returns the scaled dimensions.
+    // To get the internal coordinate, we divide by the visual scale ratio.
+    
+    // Calculate the effective scale factor currently rendered
+    // rect.width is the rendered width on screen
+    // project.imageWidth is the internal width
+    // scale = rect.width / project.imageWidth
+    const scale = rect.width / project.imageWidth;
+    
+    return {
+        x: (clientX - rect.left) / scale,
+        y: (clientY - rect.top) / scale
+    };
   };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -120,7 +154,9 @@ const AnnotationEditor: React.FC<AnnotationEditorProps> = ({
   };
 
   const startDragging = (e: React.MouseEvent, id: string, type: 'move' | 'handle', handleIndex?: number) => {
-    if (tool === 'hand') return;
+    // If drawing or panning, allow event to bubble to container
+    if (tool === 'hand' || tool === 'draw') return;
+    
     e.stopPropagation();
     const box = project.boxes.find(b => b.id === id);
     if (!box) return;
@@ -138,6 +174,18 @@ const AnnotationEditor: React.FC<AnnotationEditorProps> = ({
     if (tool === 'hand' || e.button === 1) {
       setIsPanning(true);
       setPanStart({ x: e.clientX - offset.x, y: e.clientY - offset.y });
+      return;
+    }
+
+    if (tool === 'draw') {
+        const coords = getCanvasCoords(e.clientX, e.clientY);
+        if (coords) {
+            setIsDrawing(true);
+            setDrawStart(coords);
+            setCurrentDrawRect({ x1: coords.x, y1: coords.y, x2: coords.x, y2: coords.y });
+            // Deselect existing
+            setSelectedBoxId(null);
+        }
     }
   };
 
@@ -150,8 +198,22 @@ const AnnotationEditor: React.FC<AnnotationEditorProps> = ({
       return;
     }
 
+    if (isDrawing && drawStart) {
+        const coords = getCanvasCoords(e.clientX, e.clientY);
+        if (coords) {
+            setCurrentDrawRect({
+                x1: drawStart.x,
+                y1: drawStart.y,
+                x2: coords.x,
+                y2: coords.y
+            });
+        }
+        return;
+    }
+
     if (!dragInfo) return;
     
+    // Logic for moving/resizing existing boxes
     const visualScale = project.imageUrl ? getVisualScale() : zoom;
     const dx = (e.clientX - dragInfo.startPos.x) / visualScale;
     const dy = (e.clientY - dragInfo.startPos.y) / visualScale;
@@ -172,9 +234,33 @@ const AnnotationEditor: React.FC<AnnotationEditorProps> = ({
   };
 
   const onMouseUp = () => {
+    if (isDrawing && currentDrawRect) {
+        // Finalize new box
+        const xMin = Math.min(currentDrawRect.x1, currentDrawRect.x2);
+        const yMin = Math.min(currentDrawRect.y1, currentDrawRect.y2);
+        const xMax = Math.max(currentDrawRect.x1, currentDrawRect.x2);
+        const yMax = Math.max(currentDrawRect.y1, currentDrawRect.y2);
+
+        // Minimum size threshold (e.g., 5x5 px)
+        if ((xMax - xMin) > 5 && (yMax - yMin) > 5) {
+            const newBox: Box = {
+                id: `box-new-${Date.now()}-${Math.random().toString(36).substr(2,4)}`,
+                cls_id: 0,
+                label: 'New Object',
+                score: 1.0,
+                coordinate: [xMin, yMin, xMax, yMax]
+            };
+            onUpdate([...project.boxes, newBox]);
+            setSelectedBoxId(newBox.id);
+        }
+    }
+
     setDragInfo(null);
     setIsPanning(false);
     setPanStart(null);
+    setIsDrawing(false);
+    setDrawStart(null);
+    setCurrentDrawRect(null);
   };
 
   const resetView = () => {
@@ -195,6 +281,12 @@ const AnnotationEditor: React.FC<AnnotationEditorProps> = ({
   };
 
   const hasCanvas = project.imageWidth > 0 && project.imageHeight > 0;
+  
+  // Cursor Logic
+  let cursorClass = 'cursor-default';
+  if (tool === 'hand') cursorClass = isPanning ? 'cursor-grabbing' : 'cursor-grab';
+  else if (tool === 'draw') cursorClass = 'cursor-crosshair';
+  else if (tool === 'select') cursorClass = 'cursor-default';
 
   return (
     <div className="flex flex-col lg:flex-row h-full gap-6 select-none overflow-hidden" onMouseMove={onMouseMove} onMouseUp={onMouseUp} onMouseLeave={onMouseUp}>
@@ -216,6 +308,13 @@ const AnnotationEditor: React.FC<AnnotationEditorProps> = ({
                 title="Hand Tool (Space)"
               >
                 <Hand size={16} />
+              </button>
+              <button 
+                onClick={() => setTool('draw')}
+                className={`p-1.5 rounded transition-all ${tool === 'draw' ? 'bg-slate-900 text-white shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                title="Draw Box Tool (D)"
+              >
+                <PlusSquare size={16} />
               </button>
             </div>
 
@@ -264,10 +363,11 @@ const AnnotationEditor: React.FC<AnnotationEditorProps> = ({
         <div 
           ref={containerRef}
           onMouseDown={onMouseDown}
-          className={`flex-1 relative overflow-hidden bg-slate-50 flex items-center justify-center ${tool === 'hand' ? (isPanning ? 'cursor-grabbing' : 'cursor-grab') : 'cursor-crosshair'}`}
+          className={`flex-1 relative overflow-hidden bg-slate-50 flex items-center justify-center ${cursorClass}`}
         >
           {hasCanvas ? (
             <div 
+              ref={canvasRef}
               className="relative shadow-2xl bg-white transition-transform duration-75 ease-out flex-shrink-0"
               style={{ 
                 width: project.imageWidth,
@@ -299,7 +399,7 @@ const AnnotationEditor: React.FC<AnnotationEditorProps> = ({
                   const rh = Math.abs(y2 - y1);
 
                   return (
-                    <g key={box.id} className={`pointer-events-auto ${tool === 'hand' ? 'pointer-events-none' : 'cursor-pointer'}`}>
+                    <g key={box.id} className={`pointer-events-auto ${(tool === 'hand' || tool === 'draw') ? 'pointer-events-none' : 'cursor-pointer'}`}>
                       <rect 
                         x={rx} 
                         y={ry} 
@@ -311,13 +411,13 @@ const AnnotationEditor: React.FC<AnnotationEditorProps> = ({
                         strokeWidth={2}
                         onMouseDown={(e) => startDragging(e, box.id, 'move')}
                       />
-                      {isSelected && [
+                      {isSelected && tool === 'select' && [
                         [x1, y1], [x2, y1], [x1, y2], [x2, y2]
                       ].map(([hx, hy], hidx) => (
                         <circle 
                           key={hidx}
                           cx={hx} cy={hy} 
-                          r={6} 
+                          r={6 / zoom} // Scale handle size inversely to zoom for visibility
                           fill="white" 
                           stroke={color} 
                           strokeWidth={2}
@@ -342,6 +442,20 @@ const AnnotationEditor: React.FC<AnnotationEditorProps> = ({
                     </g>
                   );
                 })}
+
+                {/* Draw Preview Box */}
+                {isDrawing && currentDrawRect && (
+                    <rect
+                        x={Math.min(currentDrawRect.x1, currentDrawRect.x2)}
+                        y={Math.min(currentDrawRect.y1, currentDrawRect.y2)}
+                        width={Math.abs(currentDrawRect.x2 - currentDrawRect.x1)}
+                        height={Math.abs(currentDrawRect.y2 - currentDrawRect.y1)}
+                        fill="rgba(37, 99, 235, 0.2)"
+                        stroke="#2563eb"
+                        strokeWidth={2}
+                        strokeDasharray="4 2"
+                    />
+                )}
               </svg>
             </div>
           ) : (
@@ -477,7 +591,7 @@ const AnnotationEditor: React.FC<AnnotationEditorProps> = ({
                          <button 
                           onClick={() => deleteBox(selectedBoxId)}
                           className="text-red-500 hover:text-red-700 transition-colors p-1 bg-white rounded"
-                          title="Delete object"
+                          title="Delete object (Del/Backspace)"
                         >
                           <Icons.Trash2 size={14} />
                         </button>

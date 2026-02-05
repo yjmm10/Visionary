@@ -21,6 +21,9 @@ const App: React.FC = () => {
   const [boxOpacity, setBoxOpacity] = useState(0.3);
   const [showLabels, setShowLabels] = useState(true);
 
+  // Clipboard State for Project Copy/Paste
+  const [clipboard, setClipboard] = useState<Project | null>(null);
+
   // Persistence
   useEffect(() => {
     const saved = localStorage.getItem(STORAGE_KEY);
@@ -45,6 +48,85 @@ const App: React.FC = () => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
   }, [projects, mergeQueue, layoutFormat, customRows, customCols, boxOpacity, showLabels]);
 
+  // Global Keyboard Shortcuts for Copy/Paste
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Ignore if user is typing in an input
+      if (document.activeElement?.tagName === 'INPUT' || document.activeElement?.tagName === 'TEXTAREA') {
+        return;
+      }
+
+      const isCmdOrCtrl = e.metaKey || e.ctrlKey;
+
+      // COPY: Cmd+C
+      if (isCmdOrCtrl && e.key === 'c') {
+        if (activeProjectId) {
+          const projectToCopy = projects.find(p => p.id === activeProjectId);
+          if (projectToCopy) {
+            // Create a deep copy for the clipboard to snapshot the current state
+            setClipboard(JSON.parse(JSON.stringify(projectToCopy)));
+          }
+        }
+      }
+
+      // PASTE: Cmd+V
+      if (isCmdOrCtrl && e.key === 'v') {
+        if (clipboard) {
+          e.preventDefault(); // Prevent double pasting if focus is somewhere weird
+          
+          const newId = `proj-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`;
+          
+          // Generate new IDs for all boxes to prevent conflicts
+          const newBoxes = clipboard.boxes.map((box, idx) => ({
+            ...box,
+            id: `box-${newId}-${idx}-${Math.random().toString(36).substr(2, 5)}`
+          }));
+
+          // Logic to append "(Copy)" to the name nicely
+          let newPath = clipboard.input_path;
+          const parts = newPath.split('.');
+          if (parts.length > 1) {
+            const ext = parts.pop();
+            newPath = `${parts.join('.')} (Copy).${ext}`;
+          } else {
+            newPath = `${newPath} (Copy)`;
+          }
+
+          const newProject: Project = {
+            ...clipboard,
+            id: newId,
+            input_path: newPath,
+            boxes: newBoxes,
+            // Keep image data (URL/width/height)
+          };
+
+          setProjects(prev => [...prev, newProject]);
+          setActiveProjectId(newId); // Switch focus to the new copy
+          
+          // Auto-add copy to merge queue if space exists
+          setMergeQueue(prev => {
+            const config = layoutFormat === 'custom' 
+              ? { rows: customRows, cols: customCols } 
+              : LAYOUT_CONFIGS[layoutFormat];
+            const totalSlots = config.rows * config.cols;
+
+            const next = [...prev];
+            while (next.length < totalSlots) next.push(null);
+
+            const emptyIdx = next.indexOf(null);
+            if (emptyIdx !== -1) {
+              next[emptyIdx] = newId;
+            }
+            return next;
+          });
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [activeProjectId, clipboard, projects, layoutFormat, customRows, customCols]);
+
   const activeProject = projects.find(p => p.id === activeProjectId);
 
   const handleUpload = (newProjects: Project[]) => {
@@ -52,6 +134,28 @@ const App: React.FC = () => {
     if (!activeProjectId && newProjects.length > 0) {
       setActiveProjectId(newProjects[0].id);
     }
+
+    // Auto-add newly uploaded projects to available slots in Merge Queue
+    setMergeQueue(prev => {
+      const config = layoutFormat === 'custom' 
+        ? { rows: customRows, cols: customCols } 
+        : LAYOUT_CONFIGS[layoutFormat];
+      const totalSlots = config.rows * config.cols;
+
+      const next = [...prev];
+      // Ensure array is at least totalSlots long (in case it hasn't been initialized by MergeWorkspace yet)
+      while (next.length < totalSlots) next.push(null);
+
+      let pIdx = 0;
+      // Fill empty slots with new project IDs
+      for (let i = 0; i < totalSlots && pIdx < newProjects.length; i++) {
+        if (next[i] === null) {
+          next[i] = newProjects[pIdx].id;
+          pIdx++;
+        }
+      }
+      return next;
+    });
   };
 
   const updateProjectBoxes = (boxes: Box[]) => {
