@@ -1,0 +1,7 @@
+{
+  "name": "Visionary Box Editor & Merger",
+  "description": "A high-end annotation editor for PDF/image analysis data with real-time visualization, box adjustments, and a flexible grid-based merging workspace for creating consolidated report images.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}

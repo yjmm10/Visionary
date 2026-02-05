@@ -1,0 +1,172 @@
+
+import React, { useState, useEffect } from 'react';
+import { Project, LayoutFormat, Box } from './types';
+import { Icons, LAYOUT_CONFIGS } from './constants';
+import Sidebar from './components/Sidebar';
+import AnnotationEditor from './components/AnnotationEditor';
+import MergeWorkspace from './components/MergeWorkspace';
+
+const STORAGE_KEY = 'VISIONARY_EDITOR_STATE_V3';
+
+const App: React.FC = () => {
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
+  const [mergeQueue, setMergeQueue] = useState<(string | null)[]>([]);
+  const [layoutFormat, setLayoutFormat] = useState<LayoutFormat>('2x2');
+  const [customRows, setCustomRows] = useState(2);
+  const [customCols, setCustomCols] = useState(2);
+  const [view, setView] = useState<'editor' | 'merge'>('editor');
+
+  // Persistence
+  useEffect(() => {
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        setProjects(parsed.projects || []);
+        setMergeQueue(parsed.mergeQueue || []);
+        setLayoutFormat(parsed.layoutFormat || '2x2');
+        setCustomRows(parsed.customRows || 2);
+        setCustomCols(parsed.customCols || 2);
+      } catch (e) {
+        console.error("Failed to load state", e);
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    const state = { projects, mergeQueue, layoutFormat, customRows, customCols };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  }, [projects, mergeQueue, layoutFormat, customRows, customCols]);
+
+  const activeProject = projects.find(p => p.id === activeProjectId);
+
+  const handleUpload = (newProjects: Project[]) => {
+    setProjects(prev => [...prev, ...newProjects]);
+    if (!activeProjectId && newProjects.length > 0) {
+      setActiveProjectId(newProjects[0].id);
+    }
+  };
+
+  const updateProjectBoxes = (boxes: Box[]) => {
+    if (!activeProjectId) return;
+    setProjects(prev => prev.map(p => p.id === activeProjectId ? { ...p, boxes } : p));
+  };
+
+  const setImageForProject = (url: string | undefined, w: number, h: number) => {
+    if (!activeProjectId) return;
+    setProjects(prev => prev.map(p => p.id === activeProjectId ? { ...p, imageUrl: url, imageWidth: w, imageHeight: h } : p));
+  };
+
+  const deleteProject = (id: string) => {
+    setProjects(prev => prev.filter(p => p.id !== id));
+    setMergeQueue(prev => prev.map(mid => mid === id ? null : mid));
+    if (activeProjectId === id) setActiveProjectId(null);
+  };
+
+  const toggleInMerge = (id: string) => {
+    if (mergeQueue.includes(id)) {
+      setMergeQueue(prev => prev.map(mid => mid === id ? null : mid));
+    } else {
+      const firstEmpty = mergeQueue.indexOf(null);
+      if (firstEmpty !== -1) {
+        setMergeQueue(prev => {
+          const next = [...prev];
+          next[firstEmpty] = id;
+          return next;
+        });
+      } else {
+        setMergeQueue(prev => [...prev, id]);
+      }
+    }
+  };
+
+  const handleReorderMerge = (newIds: (string | null)[]) => {
+    setMergeQueue(newIds);
+  };
+
+  const navigateToEditor = (id: string) => {
+    setActiveProjectId(id);
+    setView('editor');
+  };
+
+  return (
+    <div className="flex h-screen w-full bg-slate-50 text-slate-900 overflow-hidden">
+      <Sidebar 
+        projects={projects} 
+        activeId={activeProjectId} 
+        onSelect={setActiveProjectId} 
+        onDelete={deleteProject}
+        onUpload={handleUpload}
+        view={view}
+        setView={setView}
+      />
+
+      <main className="flex-1 flex flex-col relative overflow-hidden">
+        <header className="h-14 border-b border-slate-200 bg-white flex items-center justify-between px-6 shrink-0 z-10">
+          <div className="flex items-center gap-4">
+            <h2 className="text-sm font-bold text-slate-800 uppercase tracking-widest">
+              {view === 'editor' ? 'Object Editor' : 'Consolidation Workspace'}
+            </h2>
+            {view === 'editor' && activeProject && (
+              <div className="flex items-center gap-2 px-3 py-1 bg-blue-50 border border-blue-100 rounded text-[10px] font-bold text-blue-600">
+                <Icons.FileText size={12} />
+                {activeProject.input_path.split('/').pop()}
+              </div>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            {view === 'editor' && activeProjectId && (
+              <button 
+                onClick={() => toggleInMerge(activeProjectId)}
+                className={`flex items-center gap-2 px-3 py-1.5 rounded text-[10px] font-bold uppercase transition-all ${mergeQueue.includes(activeProjectId) ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
+              >
+                {mergeQueue.includes(activeProjectId) ? <Icons.Check size={12} /> : <Icons.Plus size={12} />}
+                {mergeQueue.includes(activeProjectId) ? 'Added to Merge' : 'Add to Merge'}
+              </button>
+            )}
+            <div className="w-px h-4 bg-slate-200 mx-2" />
+            <button className="p-2 text-slate-400 hover:text-slate-600 transition-colors">
+              <Icons.Settings size={18} />
+            </button>
+          </div>
+        </header>
+
+        <div className="flex-1 overflow-hidden p-6">
+          {view === 'editor' ? (
+            activeProject ? (
+              <AnnotationEditor 
+                project={activeProject} 
+                onUpdate={updateProjectBoxes}
+                onImageSet={setImageForProject}
+              />
+            ) : (
+              <div className="h-full flex flex-col items-center justify-center bg-white border border-slate-200 rounded-2xl shadow-sm text-center p-12">
+                <div className="w-16 h-16 bg-slate-50 rounded-full flex items-center justify-center mb-6">
+                  <Icons.FileText size={32} className="text-slate-200" />
+                </div>
+                <h3 className="text-lg font-bold text-slate-800 mb-2">No Project Selected</h3>
+                <p className="text-sm text-slate-400 max-w-xs mx-auto">Import JSON analysis results from the sidebar or select a recent file to start editing.</p>
+              </div>
+            )
+          ) : (
+            <MergeWorkspace 
+              projects={projects}
+              mergeQueue={mergeQueue}
+              layout={layoutFormat}
+              customRows={customRows}
+              customCols={customCols}
+              setLayout={setLayoutFormat}
+              setCustomRows={setCustomRows}
+              setCustomCols={setCustomCols}
+              onReorder={handleReorderMerge}
+              onDoubleClick={navigateToEditor}
+            />
+          )}
+        </div>
+      </main>
+    </div>
+  );
+};
+
+export default App;
