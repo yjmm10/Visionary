@@ -32,13 +32,30 @@ const JsonUploader: React.FC<JsonUploaderProps> = ({ onUpload }) => {
           coordinate: b.coordinate
         }));
 
+        // Calculate auto-dimensions based on box content to serve as default "White Map"
+        // This ensures the user sees a layout immediately without uploading an image
+        let maxX = 0;
+        let maxY = 0;
+        boxes.forEach(b => {
+          if (b.coordinate && b.coordinate.length === 4) {
+             const x = Math.max(b.coordinate[0], b.coordinate[2]);
+             const y = Math.max(b.coordinate[1], b.coordinate[3]);
+             if (x > maxX) maxX = x;
+             if (y > maxY) maxY = y;
+          }
+        });
+
+        // Use A4-ish standard (approx 1240x1754 at ~150dpi) as minimum, or expand to fit content + margin
+        const imageWidth = Math.max(1240, Math.ceil(maxX + 100));
+        const imageHeight = Math.max(1754, Math.ceil(maxY + 100));
+
         newProjects.push({
           id: `proj-${Math.random().toString(36).substr(2, 9)}-${Date.now()}`,
           input_path: data.input_path || 'unknown_path.pdf',
           page_index: data.page_index || 0,
           boxes,
-          imageWidth: 0,
-          imageHeight: 0
+          imageWidth, // Auto-set dimensions
+          imageHeight // Auto-set dimensions
         });
       } catch (err) {
         console.error("Error parsing JSON", err);
