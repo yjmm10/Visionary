@@ -16,6 +16,10 @@ const App: React.FC = () => {
   const [customRows, setCustomRows] = useState(2);
   const [customCols, setCustomCols] = useState(2);
   const [view, setView] = useState<'editor' | 'merge'>('editor');
+  
+  // Shared Visual State
+  const [boxOpacity, setBoxOpacity] = useState(0.3);
+  const [showLabels, setShowLabels] = useState(true);
 
   // Persistence
   useEffect(() => {
@@ -28,6 +32,8 @@ const App: React.FC = () => {
         setLayoutFormat(parsed.layoutFormat || '2x2');
         setCustomRows(parsed.customRows || 2);
         setCustomCols(parsed.customCols || 2);
+        if (parsed.boxOpacity !== undefined) setBoxOpacity(parsed.boxOpacity);
+        if (parsed.showLabels !== undefined) setShowLabels(parsed.showLabels);
       } catch (e) {
         console.error("Failed to load state", e);
       }
@@ -35,9 +41,9 @@ const App: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    const state = { projects, mergeQueue, layoutFormat, customRows, customCols };
+    const state = { projects, mergeQueue, layoutFormat, customRows, customCols, boxOpacity, showLabels };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-  }, [projects, mergeQueue, layoutFormat, customRows, customCols]);
+  }, [projects, mergeQueue, layoutFormat, customRows, customCols, boxOpacity, showLabels]);
 
   const activeProject = projects.find(p => p.id === activeProjectId);
 
@@ -139,6 +145,10 @@ const App: React.FC = () => {
                 project={activeProject} 
                 onUpdate={updateProjectBoxes}
                 onImageSet={setImageForProject}
+                boxOpacity={boxOpacity}
+                setBoxOpacity={setBoxOpacity}
+                showLabels={showLabels}
+                setShowLabels={setShowLabels}
               />
             ) : (
               <div className="h-full flex flex-col items-center justify-center bg-white border border-slate-200 rounded-2xl shadow-sm text-center p-12">
@@ -161,6 +171,8 @@ const App: React.FC = () => {
               setCustomCols={setCustomCols}
               onReorder={handleReorderMerge}
               onDoubleClick={navigateToEditor}
+              boxOpacity={boxOpacity}
+              showLabels={showLabels}
             />
           )}
         </div>

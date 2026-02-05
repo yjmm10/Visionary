@@ -8,16 +8,26 @@ interface AnnotationEditorProps {
   project: Project;
   onUpdate: (boxes: Box[]) => void;
   onImageSet: (url: string | undefined, w: number, h: number) => void;
+  boxOpacity: number;
+  setBoxOpacity: (o: number) => void;
+  showLabels: boolean;
+  setShowLabels: (s: boolean) => void;
 }
 
-const AnnotationEditor: React.FC<AnnotationEditorProps> = ({ project, onUpdate, onImageSet }) => {
+const AnnotationEditor: React.FC<AnnotationEditorProps> = ({ 
+  project, 
+  onUpdate, 
+  onImageSet,
+  boxOpacity,
+  setBoxOpacity,
+  showLabels,
+  setShowLabels
+}) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const imgRef = useRef<HTMLImageElement>(null);
   const [selectedBoxId, setSelectedBoxId] = useState<string | null>(null);
   const [zoom, setZoom] = useState(1);
   const [offset, setOffset] = useState({ x: 0, y: 0 });
-  const [boxOpacity, setBoxOpacity] = useState(0.3);
-  const [showLabels, setShowLabels] = useState(true);
   const [tool, setTool] = useState<'select' | 'hand'>('select');
   const [isPanning, setIsPanning] = useState(false);
   

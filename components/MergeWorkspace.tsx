@@ -15,6 +15,8 @@ interface MergeWorkspaceProps {
   setCustomCols: (c: number) => void;
   onReorder: (ids: (string | null)[]) => void;
   onDoubleClick: (id: string) => void;
+  boxOpacity: number;
+  showLabels: boolean;
 }
 
 const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({ 
@@ -27,7 +29,9 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
   setCustomRows,
   setCustomCols,
   onReorder,
-  onDoubleClick 
+  onDoubleClick,
+  boxOpacity,
+  showLabels
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
@@ -98,6 +102,68 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
   const handleDragStart = (e: React.DragEvent, index: number) => {
     setDraggingIndex(index);
     e.dataTransfer.effectAllowed = 'move';
+
+    // OPTIMIZATION: Create a small thumbnail for the drag image
+    // This prevents the browser from creating a massive ghost image from the full-res DOM element
+    const projectId = mergeQueue[index];
+    const project = projects.find(p => p.id === projectId);
+    const slotElement = e.currentTarget as HTMLElement;
+    const imgElement = slotElement.querySelector('img');
+
+    if (project) {
+        const canvas = document.createElement('canvas');
+        const thumbWidth = 200; // Manageable drag preview width
+        const ratio = gridMetrics.baseH / gridMetrics.baseW;
+        const thumbHeight = thumbWidth * ratio;
+
+        canvas.width = thumbWidth;
+        canvas.height = thumbHeight;
+
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+            // Background
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(0, 0, thumbWidth, thumbHeight);
+
+            // Draw Image
+            if (imgElement && imgElement.complete) {
+                const imgRatio = imgElement.naturalWidth / imgElement.naturalHeight;
+                const canvasRatio = thumbWidth / thumbHeight;
+                
+                let drawW, drawH, drawX, drawY;
+
+                if (imgRatio > canvasRatio) {
+                    drawW = thumbWidth;
+                    drawH = thumbWidth / imgRatio;
+                    drawX = 0;
+                    drawY = (thumbHeight - drawH) / 2;
+                } else {
+                    drawH = thumbHeight;
+                    drawW = thumbHeight * imgRatio;
+                    drawY = 0;
+                    drawX = (thumbWidth - drawW) / 2;
+                }
+                
+                ctx.drawImage(imgElement, drawX, drawY, drawW, drawH);
+            } else {
+                // Placeholder
+                ctx.fillStyle = '#e2e8f0';
+                ctx.fillRect(0, 0, thumbWidth, thumbHeight);
+                ctx.fillStyle = '#64748b';
+                ctx.font = 'bold 16px sans-serif';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText('ITEM', thumbWidth / 2, thumbHeight / 2);
+            }
+
+            // Border
+            ctx.strokeStyle = '#3b82f6';
+            ctx.lineWidth = 4;
+            ctx.strokeRect(0, 0, thumbWidth, thumbHeight);
+
+            e.dataTransfer.setDragImage(canvas, thumbWidth / 2, thumbHeight / 2);
+        }
+    }
   };
 
   const handleDragOver = (e: React.DragEvent, index: number) => {
@@ -335,19 +401,36 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
                           viewBox={`0 0 ${project.imageWidth} ${project.imageHeight}`}
                           preserveAspectRatio="xMidYMid meet"
                         >
-                          {project.boxes.map((box) => (
-                            <rect 
-                              key={box.id}
-                              x={Math.min(box.coordinate[0], box.coordinate[2])} 
-                              y={Math.min(box.coordinate[1], box.coordinate[3])} 
-                              width={Math.abs(box.coordinate[2] - box.coordinate[0])} 
-                              height={Math.abs(box.coordinate[3] - box.coordinate[1])} 
-                              fill="transparent"
-                              stroke={COLORS[box.cls_id % COLORS.length]}
-                              strokeWidth={project.imageWidth / 150} // Relative stroke width
-                              strokeOpacity={0.8}
-                            />
-                          ))}
+                          {project.boxes.map((box) => {
+                            const color = COLORS[box.cls_id % COLORS.length];
+                            return (
+                              <g key={box.id}>
+                                <rect 
+                                  x={Math.min(box.coordinate[0], box.coordinate[2])} 
+                                  y={Math.min(box.coordinate[1], box.coordinate[3])} 
+                                  width={Math.abs(box.coordinate[2] - box.coordinate[0])} 
+                                  height={Math.abs(box.coordinate[3] - box.coordinate[1])} 
+                                  fill={color}
+                                  fillOpacity={boxOpacity}
+                                  stroke={color}
+                                  strokeWidth={project.imageWidth / 200} // Tuned stroke width
+                                  strokeOpacity={1}
+                                />
+                                {showLabels && (
+                                  <text
+                                    x={Math.min(box.coordinate[0], box.coordinate[2])}
+                                    y={Math.min(box.coordinate[1], box.coordinate[3]) - (project.imageWidth * 0.005)}
+                                    fill={color}
+                                    fontSize={Math.max(14, project.imageWidth * 0.015)} // Dynamic but minimum 14px
+                                    fontWeight="bold"
+                                    style={{ textShadow: '0px 0px 2px white' }}
+                                  >
+                                    {box.label}
+                                  </text>
+                                )}
+                              </g>
+                            );
+                          })}
                         </svg>
                       )}
 

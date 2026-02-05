@@ -26,4 +26,6 @@ export interface AppState {
   layoutFormat: LayoutFormat;
   customRows: number;
   customCols: number;
+  boxOpacity: number;
+  showLabels: boolean;
 }
