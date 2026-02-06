@@ -25,4 +25,12 @@ export interface AppState {
   cols: number;
   boxOpacity: number;
   showLabels: boolean;
+  view?: 'editor' | 'merge';
+}
+
+export interface Snapshot {
+  id: string;
+  name: string;
+  timestamp: number;
+  state: AppState;
 }

@@ -12,7 +12,9 @@ import {
   Move, 
   Grid,
   Copy,
-  Check
+  Check,
+  Save,
+  Upload
 } from 'lucide-react';
 
 export const COLORS = [
@@ -46,5 +48,7 @@ export const Icons = {
   Move,
   Grid,
   Copy,
-  Check
+  Check,
+  Save,
+  Upload
 };

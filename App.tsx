@@ -1,12 +1,13 @@
 
-import React, { useState, useEffect } from 'react';
-import { Project, Box } from './types';
+import React, { useState, useEffect, useCallback } from 'react';
+import { Project, Box, AppState, Snapshot } from './types';
 import { Icons } from './constants';
 import Sidebar from './components/Sidebar';
 import AnnotationEditor from './components/AnnotationEditor';
 import MergeWorkspace from './components/MergeWorkspace';
 
 const STORAGE_KEY = 'VISIONARY_EDITOR_STATE_V3';
+const SNAPSHOTS_KEY = 'VISIONARY_SNAPSHOTS';
 
 const App: React.FC = () => {
   const [projects, setProjects] = useState<Project[]>([]);
@@ -26,35 +27,60 @@ const App: React.FC = () => {
   // Clipboard State for Project Copy/Paste
   const [clipboard, setClipboard] = useState<Project | null>(null);
 
+  // Snapshots State
+  const [snapshots, setSnapshots] = useState<Snapshot[]>([]);
+
   // Persistence
   useEffect(() => {
+    // Load Main State
     const saved = localStorage.getItem(STORAGE_KEY);
     if (saved) {
       try {
         const parsed = JSON.parse(saved);
         setProjects(parsed.projects || []);
         setMergeQueue(parsed.mergeQueue || []);
-        // Load rows/cols if they exist, otherwise default to 3x3
         setRows(parsed.rows || 3);
         setCols(parsed.cols || 3);
-        
         if (parsed.boxOpacity !== undefined) setBoxOpacity(parsed.boxOpacity);
         if (parsed.showLabels !== undefined) setShowLabels(parsed.showLabels);
+        if (parsed.view) setView(parsed.view);
       } catch (e) {
         console.error("Failed to load state", e);
+      }
+    }
+
+    // Load Snapshots
+    const savedSnapshots = localStorage.getItem(SNAPSHOTS_KEY);
+    if (savedSnapshots) {
+      try {
+        setSnapshots(JSON.parse(savedSnapshots));
+      } catch (e) {
+        console.error("Failed to load snapshots", e);
       }
     }
   }, []);
 
   useEffect(() => {
-    const state = { projects, mergeQueue, rows, cols, boxOpacity, showLabels };
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-  }, [projects, mergeQueue, rows, cols, boxOpacity, showLabels]);
+    try {
+      const state = { projects, mergeQueue, rows, cols, boxOpacity, showLabels, view };
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    } catch (e) {
+      console.warn("Failed to save main state to localStorage (likely quota exceeded).", e);
+    }
+  }, [projects, mergeQueue, rows, cols, boxOpacity, showLabels, view]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(SNAPSHOTS_KEY, JSON.stringify(snapshots));
+    } catch (e) {
+      console.warn("Failed to save snapshots to localStorage.", e);
+      // We don't alert here to avoid spamming, but we do alert in createQuickSnapshot if it fails immediately
+    }
+  }, [snapshots]);
 
   // Global Keyboard Shortcuts for Copy/Paste
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Ignore if user is typing in an input
       if (document.activeElement?.tagName === 'INPUT' || document.activeElement?.tagName === 'TEXTAREA') {
         return;
       }
@@ -66,7 +92,6 @@ const App: React.FC = () => {
         if (activeProjectId) {
           const projectToCopy = projects.find(p => p.id === activeProjectId);
           if (projectToCopy) {
-            // Create a deep copy for the clipboard to snapshot the current state
             setClipboard(JSON.parse(JSON.stringify(projectToCopy)));
           }
         }
@@ -75,17 +100,14 @@ const App: React.FC = () => {
       // PASTE: Cmd+V
       if (isCmdOrCtrl && e.key === 'v') {
         if (clipboard) {
-          e.preventDefault(); // Prevent double pasting if focus is somewhere weird
+          e.preventDefault();
           
           const newId = `proj-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`;
-          
-          // Generate new IDs for all boxes to prevent conflicts
           const newBoxes = clipboard.boxes.map((box, idx) => ({
             ...box,
             id: `box-${newId}-${idx}-${Math.random().toString(36).substr(2, 5)}`
           }));
 
-          // Logic to append "(Copy)" to the name nicely
           let newPath = clipboard.input_path;
           const parts = newPath.split('.');
           if (parts.length > 1) {
@@ -100,13 +122,11 @@ const App: React.FC = () => {
             id: newId,
             input_path: newPath,
             boxes: newBoxes,
-            // Keep image data (URL/width/height)
           };
 
           setProjects(prev => [...prev, newProject]);
-          setActiveProjectId(newId); // Switch focus to the new copy
+          setActiveProjectId(newId); 
           
-          // Auto-add copy to merge queue if space exists
           setMergeQueue(prev => {
             const totalSlots = rows * cols;
             const next = [...prev];
@@ -133,16 +153,11 @@ const App: React.FC = () => {
     if (!activeProjectId && newProjects.length > 0) {
       setActiveProjectId(newProjects[0].id);
     }
-
-    // Auto-add newly uploaded projects to available slots in Merge Queue
     setMergeQueue(prev => {
       const totalSlots = rows * cols;
       const next = [...prev];
-      // Ensure array is at least totalSlots long
       while (next.length < totalSlots) next.push(null);
-
       let pIdx = 0;
-      // Fill empty slots with new project IDs
       for (let i = 0; i < totalSlots && pIdx < newProjects.length; i++) {
         if (next[i] === null) {
           next[i] = newProjects[pIdx].id;
@@ -168,9 +183,14 @@ const App: React.FC = () => {
   };
 
   const deleteProject = (id: string) => {
+    // Sandbox blocks confirm(), so we execute immediately
     setProjects(prev => prev.filter(p => p.id !== id));
     setMergeQueue(prev => prev.map(mid => mid === id ? null : mid));
     if (activeProjectId === id) setActiveProjectId(null);
+  };
+
+  const renameProject = (id: string, newName: string) => {
+    setProjects(prev => prev.map(p => p.id === id ? { ...p, input_path: newName } : p));
   };
 
   const toggleInMerge = (id: string) => {
@@ -199,6 +219,101 @@ const App: React.FC = () => {
     setView('editor');
   };
 
+  // --- Snapshot Handlers ---
+  const handleExportSnapshot = () => {
+    const snapshot = {
+      version: 3,
+      timestamp: Date.now(),
+      state: { projects, activeProjectId, mergeQueue, rows, cols, boxOpacity, showLabels, view }
+    };
+    const blob = new Blob([JSON.stringify(snapshot, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `visionary-snapshot-${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const handleImportSnapshot = (file: File) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const json = JSON.parse(e.target?.result as string);
+        const data = json.state || json;
+        restoreState(data);
+        alert("Snapshot restored successfully!");
+      } catch (err) {
+        console.error("Failed to parse snapshot", err);
+        alert("Error: Invalid snapshot file.");
+      }
+    };
+    reader.readAsText(file);
+  };
+
+  // --- Quick Snapshots (Local Cache) ---
+  const createQuickSnapshot = (name: string) => {
+    if (name) {
+      try {
+        // IMPORTANT: Deep copy the state to avoid reference issues where
+        // future mutations to 'projects' inadvertently change the saved snapshot.
+        const currentState = { projects, activeProjectId, mergeQueue, rows, cols, boxOpacity, showLabels, view };
+        const deepCopiedState = JSON.parse(JSON.stringify(currentState));
+
+        const newSnapshot: Snapshot = {
+          id: Date.now().toString(),
+          name,
+          timestamp: Date.now(),
+          state: deepCopiedState
+        };
+        
+        // Test save to ensure quota isn't exceeded before updating state
+        const potentialNewSnapshots = [newSnapshot, ...snapshots];
+        const stringified = JSON.stringify(potentialNewSnapshots);
+        
+        try {
+            localStorage.setItem('TEST_QUOTA', stringified);
+            localStorage.removeItem('TEST_QUOTA');
+            setSnapshots(potentialNewSnapshots);
+        } catch (e) {
+            alert("Cannot save snapshot: Local storage quota exceeded. Try deleting old snapshots or exporting data to a file.");
+        }
+      } catch (e) {
+        console.error("Snapshot creation failed", e);
+      }
+    }
+  };
+
+  const restoreQuickSnapshot = (snapshot: Snapshot) => {
+    // Sandbox blocks confirm(), so we restore immediately. 
+    // In a production app, we would use a custom modal here.
+    try {
+        // Deep copy again on restore to ensure the snapshot remains pristine
+        // even if the restored state is later mutated.
+        const stateToRestore = JSON.parse(JSON.stringify(snapshot.state));
+        restoreState(stateToRestore);
+    } catch(e) {
+        console.error("Failed to restore snapshot", e);
+    }
+  };
+
+  const deleteQuickSnapshot = (id: string) => {
+    setSnapshots(prev => prev.filter(s => s.id !== id));
+  };
+
+  const restoreState = (data: any) => {
+    if (data.projects) setProjects(data.projects);
+    if (data.activeProjectId !== undefined) setActiveProjectId(data.activeProjectId);
+    if (data.mergeQueue) setMergeQueue(data.mergeQueue);
+    if (data.rows) setRows(data.rows);
+    if (data.cols) setCols(data.cols);
+    if (data.boxOpacity !== undefined) setBoxOpacity(data.boxOpacity);
+    if (data.showLabels !== undefined) setShowLabels(data.showLabels);
+    if (data.view) setView(data.view);
+  };
+
   return (
     <div className="flex h-screen w-full bg-slate-50 text-slate-900 overflow-hidden">
       <Sidebar 
@@ -206,9 +321,16 @@ const App: React.FC = () => {
         activeId={activeProjectId} 
         onSelect={setActiveProjectId} 
         onDelete={deleteProject}
+        onRename={renameProject}
         onUpload={handleUpload}
         view={view}
         setView={setView}
+        onExportSnapshot={handleExportSnapshot}
+        onImportSnapshot={handleImportSnapshot}
+        snapshots={snapshots}
+        onCreateSnapshot={createQuickSnapshot}
+        onRestoreSnapshot={restoreQuickSnapshot}
+        onDeleteSnapshot={deleteQuickSnapshot}
       />
 
       <main className="flex-1 flex flex-col relative overflow-hidden">
@@ -220,7 +342,7 @@ const App: React.FC = () => {
             {view === 'editor' && activeProject && (
               <div className="flex items-center gap-2 px-3 py-1 bg-blue-50 border border-blue-100 rounded text-[10px] font-bold text-blue-600">
                 <Icons.FileText size={12} />
-                {activeProject.input_path.split('/').pop()}
+                <span className="truncate max-w-[200px]" title={activeProject.input_path}>{activeProject.input_path.split('/').pop()}</span>
               </div>
             )}
           </div>

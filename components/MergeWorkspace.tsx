@@ -209,8 +209,6 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
      if (!contentRef.current) return null;
      
      // Get grid container boundaries relative to viewport
-     // But wait, the contentRef is inside a transformed container.
-     // Best to calculate relative to offset and zoom.
      const relX = (clientX - containerRef.current!.getBoundingClientRect().left - offset.x) / zoom;
      const relY = (clientY - containerRef.current!.getBoundingClientRect().top - offset.y) / zoom;
 
@@ -271,6 +269,7 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
   const handleBoxMouseDown = (e: React.MouseEvent, projectId: string, boxId: string, type: 'move' | 'handle', handleIndex?: number) => {
     if (tool !== 'select') return;
     e.stopPropagation();
+    e.preventDefault(); // Prevent native drag of parent slot
 
     const project = projects.find(p => p.id === projectId);
     if (!project) return;
@@ -299,50 +298,24 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
     }
 
     if (isDrawing && drawStart && currentDrawRect) {
-         const coords = getCellCoordinates(e.clientX, e.clientY);
-         // Even if dragging outside the specific cell, we can project...
-         // But simplest is to reuse the initial projectId logic but calculate relative to the cell start
-         // We need to re-calculate localX relative to the cell we STARTED in.
-         
+         // Logic simplified: just track mouse to update rect end
+         // Re-calculate relative to container to get absolute grid position
          const relX = (e.clientX - containerRef.current!.getBoundingClientRect().left - offset.x) / zoom;
          const relY = (e.clientY - containerRef.current!.getBoundingClientRect().top - offset.y) / zoom;
-         
-         // Find start cell index
-         // We don't need index, just modulo logic relative to start
-         // Wait, drawing across cells is weird. Let's clamp to cell?
-         // Simpler: recalculate img coords based on original cell logic
          
          const project = projects.find(p => p.id === drawStart.projectId);
          if (!project) return;
          
-         // Where is the start cell?
-         const startIdx = mergeQueue.findIndex(id => id === drawStart.projectId); // This might find first instance. If duplicate projects, issue.
-         // Better to rely on mouse relative to grid.
-         // Let's just blindly assume user stays roughly in cell or we clamp.
+         // Using modulo to find local coordinate within the current hovered cell-space
+         // Note: this assumes drawing stays within a cell visually or maps to it
+         const localX = relX % gridMetrics.baseW;
+         const localY = relY % gridMetrics.baseH;
          
-         // We need the offset of the cell in the grid
-         // We can't easily get it without index. 
-         // Let's assume user draws inside the cell for MVP or rework getCellCoordinates to return global-ish relative.
-         
-         // Re-use logic:
          const scale = Math.min(gridMetrics.baseW / project.imageWidth, gridMetrics.baseH / project.imageHeight);
          const drawnW = project.imageWidth * scale;
          const drawnH = project.imageHeight * scale;
          const offX = (gridMetrics.baseW - drawnW) / 2;
          const offY = (gridMetrics.baseH - drawnH) / 2;
-
-         // We need to subtract the cell's top-left from relX/relY
-         // To find cell top-left:
-         const col = Math.floor(relX / gridMetrics.baseW);
-         const row = Math.floor(relY / gridMetrics.baseH);
-         
-         // Ideally we check if we are still in same cell.
-         // For now let's just use current mouse relative to current hovered cell? 
-         // No, that jumps if mouse crosses line.
-         // Let's just use `relX % baseW` assuming we are in the "active" cell.
-         
-         const localX = relX % gridMetrics.baseW;
-         const localY = relY % gridMetrics.baseH;
          
          const imgX = (localX - offX) / scale;
          const imgY = (localY - offY) / scale;
@@ -429,7 +402,7 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
 
     if (project) {
         const canvas = document.createElement('canvas');
-        const thumbWidth = 100; // Reduced from 200 to 100 for smaller preview
+        const thumbWidth = 100;
         const ratio = gridMetrics.baseH / gridMetrics.baseW;
         const thumbHeight = thumbWidth * ratio;
 
@@ -734,9 +707,15 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
                       onDragOver={(e) => handleDragOver(e, idx)}
                       onDrop={(e) => handleDrop(e, idx)}
                       onDragLeave={() => setDragOverIndex(null)}
-                      draggable={tool === 'select' && !!project && !selectedBox} // Only draggable if no box is selected/targeted
+                      draggable={tool === 'select' && !!project} // Enabled even if box selected, handled by preventDefault in box mousedown
                       onDragStart={(e) => handleDragStart(e, idx)}
                       onDoubleClick={() => project && onDoubleClick(project.id)}
+                      onMouseDown={(e) => {
+                        // Deselect box if clicking on the slot background
+                        if (tool === 'select') {
+                           setSelectedBox(null);
+                        }
+                      }}
                       style={{ width: gridMetrics.baseW, height: gridMetrics.baseH }}
                       className={`relative bg-white overflow-hidden flex flex-col group box-border ${
                         project 
