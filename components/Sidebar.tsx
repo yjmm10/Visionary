@@ -3,7 +3,7 @@ import React, { useMemo, useState, useRef, useEffect } from 'react';
 import { Project, Snapshot } from '../types';
 import { Icons } from '../constants';
 import JsonUploader from './JsonUploader';
-import { ChevronDown, ChevronRight, Folder, Edit2, History, RotateCcw, X, Check } from 'lucide-react';
+import { ChevronDown, ChevronRight, Folder, Edit2, History, RotateCcw, RotateCw, X, Check } from 'lucide-react';
 
 interface SidebarProps {
   projects: Project[];
@@ -21,6 +21,11 @@ interface SidebarProps {
   onCreateSnapshot: (name: string) => void;
   onRestoreSnapshot: (s: Snapshot) => void;
   onDeleteSnapshot: (id: string) => void;
+  
+  onUndo?: () => void;
+  onRedo?: () => void;
+  canUndo?: boolean;
+  canRedo?: boolean;
 }
 
 const Sidebar: React.FC<SidebarProps> = ({ 
@@ -37,7 +42,11 @@ const Sidebar: React.FC<SidebarProps> = ({
   snapshots,
   onCreateSnapshot,
   onRestoreSnapshot,
-  onDeleteSnapshot
+  onDeleteSnapshot,
+  onUndo,
+  onRedo,
+  canUndo,
+  canRedo
 }) => {
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -153,11 +162,33 @@ const Sidebar: React.FC<SidebarProps> = ({
   return (
     <aside className="w-72 border-r border-slate-200 bg-white flex flex-col h-full shrink-0 z-20 shadow-xl">
       <div className="p-6 border-b border-slate-100">
-        <div className="flex items-center gap-3 mb-8">
-          <div className="w-8 h-8 rounded border-2 border-slate-900 flex items-center justify-center">
-            <Icons.Layers size={18} className="text-slate-900" />
-          </div>
-          <h1 className="text-lg font-bold tracking-tight text-slate-900">Visionary</h1>
+        <div className="flex items-center justify-between mb-8">
+            <div className="flex items-center gap-3">
+                <div className="w-8 h-8 rounded border-2 border-slate-900 flex items-center justify-center">
+                    <Icons.Layers size={18} className="text-slate-900" />
+                </div>
+                <h1 className="text-lg font-bold tracking-tight text-slate-900">Visionary</h1>
+            </div>
+            
+            {/* Undo/Redo Buttons */}
+            <div className="flex items-center bg-slate-100 rounded-lg p-0.5">
+                <button 
+                 onClick={onUndo}
+                 disabled={!canUndo}
+                 className="p-1.5 text-slate-600 hover:text-slate-900 hover:bg-white rounded transition-all disabled:opacity-30 disabled:hover:bg-transparent"
+                 title="Undo (Ctrl+Z)"
+                >
+                    <RotateCcw size={14} />
+                </button>
+                <button 
+                 onClick={onRedo}
+                 disabled={!canRedo}
+                 className="p-1.5 text-slate-600 hover:text-slate-900 hover:bg-white rounded transition-all disabled:opacity-30 disabled:hover:bg-transparent"
+                 title="Redo (Ctrl+Shift+Z)"
+                >
+                    <RotateCw size={14} />
+                </button>
+            </div>
         </div>
 
         <nav className="flex flex-col gap-1">

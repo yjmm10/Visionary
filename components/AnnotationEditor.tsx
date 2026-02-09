@@ -12,6 +12,9 @@ interface AnnotationEditorProps {
   setBoxOpacity: (o: number) => void;
   showLabels: boolean;
   setShowLabels: (s: boolean) => void;
+  onRecordHistory?: () => void;
+  boxClipboard?: Box | null;
+  onCopyBox?: (box: Box) => void;
 }
 
 const AnnotationEditor: React.FC<AnnotationEditorProps> = ({ 
@@ -21,7 +24,10 @@ const AnnotationEditor: React.FC<AnnotationEditorProps> = ({
   boxOpacity,
   setBoxOpacity,
   showLabels,
-  setShowLabels
+  setShowLabels,
+  onRecordHistory,
+  boxClipboard,
+  onCopyBox
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLDivElement>(null);
@@ -45,7 +51,8 @@ const AnnotationEditor: React.FC<AnnotationEditorProps> = ({
     type: 'move' | 'handle', 
     handle?: number, 
     startPos: { x: number, y: number }, 
-    originalCoords: [number, number, number, number] 
+    originalCoords: [number, number, number, number],
+    aspectRatio?: number
   } | null>(null);
 
   const [panStart, setPanStart] = useState<{ x: number, y: number } | null>(null);
@@ -77,30 +84,77 @@ const AnnotationEditor: React.FC<AnnotationEditorProps> = ({
     const handleKeyDown = (e: KeyboardEvent) => {
       if (document.activeElement?.tagName === 'INPUT') return;
       
+      const isCmdOrCtrl = e.metaKey || e.ctrlKey;
+
       if (e.code === 'Space' && tool !== 'hand') {
         e.preventDefault();
         setTool('hand');
       }
-      if (e.key.toLowerCase() === 'v') setTool('select');
-      if (e.key.toLowerCase() === 'd') setTool('draw');
+      if (e.key.toLowerCase() === 'v' && !isCmdOrCtrl) setTool('select');
+      if (e.key.toLowerCase() === 'd' && !isCmdOrCtrl) setTool('draw');
       
       // Delete shortcut
       if ((e.key === 'Delete' || e.key === 'Backspace') && selectedBoxId) {
+         if (onRecordHistory) onRecordHistory();
          deleteBox(selectedBoxId);
       }
+
+      // Box Copy - Handled in Capture phase to prevent App from seeing it
+      if (isCmdOrCtrl && e.key.toLowerCase() === 'c') {
+        if (selectedBoxId && onCopyBox) {
+          const box = project.boxes.find(b => b.id === selectedBoxId);
+          if (box) {
+            e.preventDefault();
+            e.stopPropagation(); // Stop bubbling
+            onCopyBox(box);
+          }
+        }
+      }
+
+      // Box Paste - Handled in Capture phase to prevent App from seeing it
+      if (isCmdOrCtrl && e.key.toLowerCase() === 'v') {
+        if (boxClipboard) {
+            e.preventDefault();
+            e.stopPropagation(); // Stop bubbling
+            
+            if (onRecordHistory) onRecordHistory();
+
+            const width = Math.abs(boxClipboard.coordinate[2] - boxClipboard.coordinate[0]);
+            const height = Math.abs(boxClipboard.coordinate[3] - boxClipboard.coordinate[1]);
+            const offsetAmt = 30; // 30px offset
+
+            const newBox: Box = {
+                ...boxClipboard,
+                id: `box-copy-${Date.now()}-${Math.random().toString(36).substr(2,5)}`,
+                coordinate: [
+                    boxClipboard.coordinate[0] + offsetAmt,
+                    boxClipboard.coordinate[1] + offsetAmt,
+                    boxClipboard.coordinate[2] + offsetAmt,
+                    boxClipboard.coordinate[3] + offsetAmt
+                ]
+            };
+            
+            onUpdate([...project.boxes, newBox]);
+            setSelectedBoxId(newBox.id);
+        }
+      }
     };
+    
     const handleKeyUp = (e: KeyboardEvent) => {
       if (e.code === 'Space' && tool === 'hand') {
         setTool('select');
       }
     };
-    window.addEventListener('keydown', handleKeyDown);
-    window.addEventListener('keyup', handleKeyUp);
+
+    // Use capture: true to intercept events before App.tsx handles them
+    window.addEventListener('keydown', handleKeyDown, { capture: true });
+    window.addEventListener('keyup', handleKeyUp, { capture: true });
+    
     return () => {
-      window.removeEventListener('keydown', handleKeyDown);
-      window.removeEventListener('keyup', handleKeyUp);
+      window.removeEventListener('keydown', handleKeyDown, { capture: true });
+      window.removeEventListener('keyup', handleKeyUp, { capture: true });
     };
-  }, [tool, selectedBoxId]);
+  }, [tool, selectedBoxId, onRecordHistory, boxClipboard, onCopyBox, project.boxes]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -173,15 +227,26 @@ const AnnotationEditor: React.FC<AnnotationEditorProps> = ({
     if (tool === 'hand' || tool === 'draw') return;
     
     e.stopPropagation();
+    
+    // Record History before starting modification
+    if (onRecordHistory) onRecordHistory();
+
     const box = project.boxes.find(b => b.id === id);
     if (!box) return;
+    
+    const [x1, y1, x2, y2] = box.coordinate;
+    const width = Math.abs(x2 - x1);
+    const height = Math.abs(y2 - y1);
+    const aspectRatio = height > 0 ? width / height : 1;
+
     setSelectedBoxId(id);
     setDragInfo({
       id,
       type,
       handle: handleIndex,
       startPos: { x: e.clientX, y: e.clientY },
-      originalCoords: [...box.coordinate] as [number, number, number, number]
+      originalCoords: [...box.coordinate] as [number, number, number, number],
+      aspectRatio
     });
   };
 
@@ -237,10 +302,45 @@ const AnnotationEditor: React.FC<AnnotationEditorProps> = ({
     if (dragInfo.type === 'move') {
       nextCoords = [x1 + dx, y1 + dy, x2 + dx, y2 + dy];
     } else if (dragInfo.type === 'handle') {
-      if (dragInfo.handle === 0) nextCoords = [x1 + dx, y1 + dy, x2, y2];
-      if (dragInfo.handle === 1) nextCoords = [x1, y1 + dy, x2 + dx, y2];
-      if (dragInfo.handle === 2) nextCoords = [x1 + dx, y1, x2, y2 + dy];
-      if (dragInfo.handle === 3) nextCoords = [x1, y1, x2 + dx, y2 + dy];
+      // Handles: 
+      // 0=TL, 1=TR, 2=BL, 3=BR
+      // 4=T, 5=R, 6=B, 7=L
+      let nx1 = x1, ny1 = y1, nx2 = x2, ny2 = y2;
+      
+      // Basic Resize Logic
+      // Corners
+      if (dragInfo.handle === 0) { nx1 += dx; ny1 += dy; }
+      if (dragInfo.handle === 1) { nx2 += dx; ny1 += dy; }
+      if (dragInfo.handle === 2) { nx1 += dx; ny2 += dy; }
+      if (dragInfo.handle === 3) { nx2 += dx; ny2 += dy; }
+      
+      // Edges (Single Dimension)
+      if (dragInfo.handle === 4) { ny1 += dy; } // Top
+      if (dragInfo.handle === 5) { nx2 += dx; } // Right
+      if (dragInfo.handle === 6) { ny2 += dy; } // Bottom
+      if (dragInfo.handle === 7) { nx1 += dx; } // Left
+
+      // Aspect Ratio Constraint (Shift Key) - Only applies to corners for intuitive scaling
+      if (e.shiftKey && dragInfo.aspectRatio && dragInfo.handle !== undefined && dragInfo.handle < 4) {
+          const newW = Math.abs(nx2 - nx1);
+          const newH = Math.abs(ny2 - ny1);
+          
+          if (dragInfo.handle === 0) { // Top-Left
+             const constrainedH = newW / dragInfo.aspectRatio;
+             ny1 = ny2 - constrainedH;
+          } else if (dragInfo.handle === 1) { // Top-Right
+             const constrainedH = newW / dragInfo.aspectRatio;
+             ny1 = ny2 - constrainedH;
+          } else if (dragInfo.handle === 2) { // Bottom-Left
+             const constrainedH = newW / dragInfo.aspectRatio;
+             ny2 = ny1 + constrainedH;
+          } else if (dragInfo.handle === 3) { // Bottom-Right
+             const constrainedH = newW / dragInfo.aspectRatio;
+             ny2 = ny1 + constrainedH;
+          }
+      }
+
+      nextCoords = [nx1, ny1, nx2, ny2];
     }
 
     updateBox(dragInfo.id, { coordinate: nextCoords });
@@ -248,6 +348,8 @@ const AnnotationEditor: React.FC<AnnotationEditorProps> = ({
 
   const onMouseUp = () => {
     if (isDrawing && currentDrawRect) {
+        if (onRecordHistory) onRecordHistory(); // Record before creating new box (technically on mouse down for draw would be better but this works for creation step)
+        
         const xMin = Math.min(currentDrawRect.x1, currentDrawRect.x2);
         const yMin = Math.min(currentDrawRect.y1, currentDrawRect.y2);
         const xMax = Math.max(currentDrawRect.x1, currentDrawRect.x2);
@@ -409,21 +511,36 @@ const AnnotationEditor: React.FC<AnnotationEditorProps> = ({
                         strokeWidth={2}
                         onMouseDown={(e) => startDragging(e, box.id, 'move')}
                       />
-                      {isSelected && tool === 'select' && [
-                        [x1, y1], [x2, y1], [x1, y2], [x2, y2]
-                      ].map(([hx, hy], hidx) => (
-                        <circle 
-                          key={hidx}
-                          cx={hx} cy={hy} 
-                          r={6 / zoom}
-                          fill="white" 
-                          stroke={color} 
-                          strokeWidth={2}
-                          className="cursor-pointer"
-                          style={{ cursor: hidx === 0 || hidx === 3 ? 'nwse-resize' : 'nesw-resize' }}
-                          onMouseDown={(e) => startDragging(e, box.id, 'handle', hidx)}
-                        />
-                      ))}
+                      {isSelected && tool === 'select' && (() => {
+                        const midX = (x1 + x2) / 2;
+                        const midY = (y1 + y2) / 2;
+                        const handles = [
+                          // Corners
+                          { x: x1, y: y1, i: 0, c: 'nwse-resize' },
+                          { x: x2, y: y1, i: 1, c: 'nesw-resize' },
+                          { x: x1, y: y2, i: 2, c: 'nesw-resize' },
+                          { x: x2, y: y2, i: 3, c: 'nwse-resize' },
+                          // Edges
+                          { x: midX, y: y1, i: 4, c: 'ns-resize' }, // Top
+                          { x: x2, y: midY, i: 5, c: 'ew-resize' }, // Right
+                          { x: midX, y: y2, i: 6, c: 'ns-resize' }, // Bottom
+                          { x: x1, y: midY, i: 7, c: 'ew-resize' }, // Left
+                        ];
+                        
+                        return handles.map(h => (
+                          <circle 
+                            key={h.i}
+                            cx={h.x} cy={h.y} 
+                            r={6 / zoom}
+                            fill="white" 
+                            stroke={color} 
+                            strokeWidth={2}
+                            className="cursor-pointer"
+                            style={{ cursor: h.c }}
+                            onMouseDown={(e) => startDragging(e, box.id, 'handle', h.i)}
+                          />
+                        ));
+                      })()}
                       {showLabels && (
                         <text 
                           x={rx} 
@@ -586,7 +703,10 @@ const AnnotationEditor: React.FC<AnnotationEditorProps> = ({
                       <div className="flex items-center justify-between">
                          <h4 className="text-[10px] font-bold text-slate-900 uppercase tracking-wider">Object Properties</h4>
                          <button 
-                          onClick={() => deleteBox(selectedBoxId)}
+                          onClick={() => {
+                              if(onRecordHistory) onRecordHistory();
+                              deleteBox(selectedBoxId);
+                          }}
                           className="text-red-500 hover:text-red-700 transition-colors p-1 bg-white rounded"
                           title="Delete object (Del/Backspace)"
                         >
@@ -600,7 +720,10 @@ const AnnotationEditor: React.FC<AnnotationEditorProps> = ({
                           <input 
                             type="text" 
                             value={box.label}
-                            onChange={(e) => updateBox(box.id, { label: e.target.value })}
+                            onChange={(e) => {
+                                if(onRecordHistory) onRecordHistory(); // This might trigger too often, ideally debounce or onBlur
+                                updateBox(box.id, { label: e.target.value })
+                            }}
                             className="w-full px-3 py-2 bg-white text-slate-900 border border-slate-300 rounded-md text-sm focus:ring-1 focus:ring-blue-500 outline-none shadow-sm"
                           />
                         </div>
@@ -609,7 +732,10 @@ const AnnotationEditor: React.FC<AnnotationEditorProps> = ({
                           <input 
                             type="number" 
                             value={box.cls_id}
-                            onChange={(e) => updateBox(box.id, { cls_id: parseInt(e.target.value) || 0 })}
+                            onChange={(e) => {
+                                if(onRecordHistory) onRecordHistory();
+                                updateBox(box.id, { cls_id: parseInt(e.target.value) || 0 })
+                            }}
                             className="w-full px-3 py-2 bg-white text-slate-900 border border-slate-300 rounded-md text-sm focus:ring-1 focus:ring-blue-500 outline-none shadow-sm"
                           />
                         </div>
@@ -622,6 +748,7 @@ const AnnotationEditor: React.FC<AnnotationEditorProps> = ({
                             type="number" 
                             value={Math.round(box.coordinate[0])}
                             onChange={(e) => {
+                              if(onRecordHistory) onRecordHistory();
                               const val = parseInt(e.target.value);
                               const coords = [...box.coordinate] as [number, number, number, number];
                               coords[0] = val;
@@ -636,6 +763,7 @@ const AnnotationEditor: React.FC<AnnotationEditorProps> = ({
                             type="number" 
                             value={Math.round(box.coordinate[1])}
                             onChange={(e) => {
+                              if(onRecordHistory) onRecordHistory();
                               const val = parseInt(e.target.value);
                               const coords = [...box.coordinate] as [number, number, number, number];
                               coords[1] = val;
@@ -652,6 +780,7 @@ const AnnotationEditor: React.FC<AnnotationEditorProps> = ({
                             type="number" 
                             value={Math.round(box.coordinate[2])}
                             onChange={(e) => {
+                              if(onRecordHistory) onRecordHistory();
                               const val = parseInt(e.target.value);
                               const coords = [...box.coordinate] as [number, number, number, number];
                               coords[2] = val;
@@ -666,6 +795,7 @@ const AnnotationEditor: React.FC<AnnotationEditorProps> = ({
                             type="number" 
                             value={Math.round(box.coordinate[3])}
                             onChange={(e) => {
+                              if(onRecordHistory) onRecordHistory();
                               const val = parseInt(e.target.value);
                               const coords = [...box.coordinate] as [number, number, number, number];
                               coords[3] = val;

@@ -19,6 +19,9 @@ interface MergeWorkspaceProps {
   setBoxOpacity: (o: number) => void;
   showLabels: boolean;
   setShowLabels: (s: boolean) => void;
+  onRecordHistory?: () => void;
+  boxClipboard?: Box | null;
+  onCopyBox?: (box: Box) => void;
 }
 
 const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({ 
@@ -34,7 +37,10 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
   boxOpacity,
   setBoxOpacity,
   showLabels,
-  setShowLabels
+  setShowLabels,
+  onRecordHistory,
+  boxClipboard,
+  onCopyBox
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
@@ -60,6 +66,7 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
     handleIndex?: number;
     startPos: { x: number, y: number };
     originalCoords: [number, number, number, number];
+    aspectRatio?: number;
   } | null>(null);
 
   // Drawing State
@@ -132,15 +139,60 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
     const handleKeyDown = (e: KeyboardEvent) => {
       if (document.activeElement?.tagName === 'INPUT') return;
       
+      const isCmdOrCtrl = e.metaKey || e.ctrlKey;
+
       if (e.code === 'Space' && tool !== 'hand') {
         e.preventDefault();
         setTool('hand');
       }
-      if (e.key.toLowerCase() === 'v') setTool('select');
-      if (e.key.toLowerCase() === 'd') setTool('draw');
+      if (e.key.toLowerCase() === 'v' && !isCmdOrCtrl) setTool('select');
+      if (e.key.toLowerCase() === 'd' && !isCmdOrCtrl) setTool('draw');
       
       if ((e.key === 'Delete' || e.key === 'Backspace') && selectedBox) {
+        if(onRecordHistory) onRecordHistory();
         deleteSelectedBox();
+      }
+
+      // Box Copy - Capture Phase
+      if (isCmdOrCtrl && e.key.toLowerCase() === 'c') {
+        if (selectedBox && onCopyBox) {
+            const project = projects.find(p => p.id === selectedBox.projectId);
+            if (project) {
+                const box = project.boxes.find(b => b.id === selectedBox.boxId);
+                if (box) {
+                    e.preventDefault();
+                    e.stopPropagation(); // Stop propagation to App
+                    onCopyBox(box);
+                }
+            }
+        }
+      }
+
+      // Box Paste - Capture Phase
+      if (isCmdOrCtrl && e.key.toLowerCase() === 'v') {
+        if (boxClipboard && selectedBox) {
+             e.preventDefault();
+             e.stopPropagation(); // Stop propagation to App
+             if (onRecordHistory) onRecordHistory();
+
+             const offsetAmt = 30;
+             const newBox: Box = {
+                ...boxClipboard,
+                id: `box-copy-${Date.now()}-${Math.random().toString(36).substr(2,5)}`,
+                coordinate: [
+                    boxClipboard.coordinate[0] + offsetAmt,
+                    boxClipboard.coordinate[1] + offsetAmt,
+                    boxClipboard.coordinate[2] + offsetAmt,
+                    boxClipboard.coordinate[3] + offsetAmt
+                ]
+            };
+
+            const project = projects.find(p => p.id === selectedBox.projectId);
+            if (project) {
+                 onProjectUpdate(project.id, [...project.boxes, newBox]);
+                 setSelectedBox({ projectId: project.id, boxId: newBox.id });
+            }
+        }
       }
     };
     const handleKeyUp = (e: KeyboardEvent) => {
@@ -148,13 +200,14 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
         setTool('select');
       }
     };
-    window.addEventListener('keydown', handleKeyDown);
-    window.addEventListener('keyup', handleKeyUp);
+    
+    window.addEventListener('keydown', handleKeyDown, { capture: true });
+    window.addEventListener('keyup', handleKeyUp, { capture: true });
     return () => {
-      window.removeEventListener('keydown', handleKeyDown);
-      window.removeEventListener('keyup', handleKeyUp);
+      window.removeEventListener('keydown', handleKeyDown, { capture: true });
+      window.removeEventListener('keyup', handleKeyUp, { capture: true });
     };
-  }, [tool, selectedBox]);
+  }, [tool, selectedBox, onRecordHistory, boxClipboard, onCopyBox, projects]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -270,11 +323,19 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
     if (tool !== 'select') return;
     e.stopPropagation();
     e.preventDefault(); // Prevent native drag of parent slot
+    
+    // Save history before modifying
+    if(onRecordHistory) onRecordHistory();
 
     const project = projects.find(p => p.id === projectId);
     if (!project) return;
     const box = project.boxes.find(b => b.id === boxId);
     if (!box) return;
+
+    const [x1, y1, x2, y2] = box.coordinate;
+    const width = Math.abs(x2 - x1);
+    const height = Math.abs(y2 - y1);
+    const aspectRatio = height > 0 ? width / height : 1;
 
     setSelectedBox({ projectId, boxId });
     setBoxDrag({
@@ -283,7 +344,8 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
         type,
         handleIndex,
         startPos: { x: e.clientX, y: e.clientY },
-        originalCoords: [...box.coordinate] as [number, number, number, number]
+        originalCoords: [...box.coordinate] as [number, number, number, number],
+        aspectRatio
     });
   };
 
@@ -345,10 +407,36 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
         if (boxDrag.type === 'move') {
             nextCoords = [x1 + dx, y1 + dy, x2 + dx, y2 + dy];
         } else if (boxDrag.type === 'handle') {
-            if (boxDrag.handleIndex === 0) nextCoords = [x1 + dx, y1 + dy, x2, y2];
-            if (boxDrag.handleIndex === 1) nextCoords = [x1, y1 + dy, x2 + dx, y2];
-            if (boxDrag.handleIndex === 2) nextCoords = [x1 + dx, y1, x2, y2 + dy];
-            if (boxDrag.handleIndex === 3) nextCoords = [x1, y1, x2 + dx, y2 + dy];
+            let nx1 = x1, ny1 = y1, nx2 = x2, ny2 = y2;
+
+            if (boxDrag.handleIndex === 0) { nx1 += dx; ny1 += dy; }
+            if (boxDrag.handleIndex === 1) { nx2 += dx; ny1 += dy; }
+            if (boxDrag.handleIndex === 2) { nx1 += dx; ny2 += dy; }
+            if (boxDrag.handleIndex === 3) { nx2 += dx; ny2 += dy; }
+
+            // Edges
+            if (boxDrag.handleIndex === 4) { ny1 += dy; } // Top
+            if (boxDrag.handleIndex === 5) { nx2 += dx; } // Right
+            if (boxDrag.handleIndex === 6) { ny2 += dy; } // Bottom
+            if (boxDrag.handleIndex === 7) { nx1 += dx; } // Left
+
+            // Aspect Ratio Constraint (Shift Key) - Only corners for simplicity
+            if (e.shiftKey && boxDrag.aspectRatio && boxDrag.handleIndex !== undefined && boxDrag.handleIndex < 4) {
+                const newW = Math.abs(nx2 - nx1);
+                const constrainedH = newW / boxDrag.aspectRatio;
+
+                if (boxDrag.handleIndex === 0) { // Top-Left
+                   ny1 = ny2 - constrainedH;
+                } else if (boxDrag.handleIndex === 1) { // Top-Right
+                   ny1 = ny2 - constrainedH;
+                } else if (boxDrag.handleIndex === 2) { // Bottom-Left
+                   ny2 = ny1 + constrainedH;
+                } else if (boxDrag.handleIndex === 3) { // Bottom-Right
+                   ny2 = ny1 + constrainedH;
+                }
+            }
+
+            nextCoords = [nx1, ny1, nx2, ny2];
         }
 
         updateBox(boxDrag.projectId, boxDrag.boxId, { coordinate: nextCoords });
@@ -357,6 +445,7 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
 
   const onMouseUp = () => {
     if (isDrawing && drawStart && currentDrawRect) {
+         if(onRecordHistory) onRecordHistory();
          const xMin = Math.min(currentDrawRect.x1, currentDrawRect.x2);
          const yMin = Math.min(currentDrawRect.y1, currentDrawRect.y2);
          const xMax = Math.max(currentDrawRect.x1, currentDrawRect.x2);
@@ -458,6 +547,10 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
       setDraggingIndex(null);
       return;
     }
+    
+    // Record history before reordering
+    if(onRecordHistory) onRecordHistory();
+    
     const nextQueue = [...mergeQueue];
     const temp = nextQueue[draggingIndex];
     nextQueue[draggingIndex] = nextQueue[targetIndex];
@@ -626,7 +719,10 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
                       <input 
                       type="number" min="1" max="10" 
                       value={rows} 
-                      onChange={(e) => setRows(Math.max(1, parseInt(e.target.value) || 1))}
+                      onChange={(e) => {
+                          if(onRecordHistory) onRecordHistory();
+                          setRows(Math.max(1, parseInt(e.target.value) || 1));
+                      }}
                       className="w-8 bg-transparent text-sm font-bold text-slate-900 outline-none text-center"
                       />
                   </div>
@@ -636,7 +732,10 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
                       <input 
                       type="number" min="1" max="10" 
                       value={cols} 
-                      onChange={(e) => setCols(Math.max(1, parseInt(e.target.value) || 1))}
+                      onChange={(e) => {
+                          if(onRecordHistory) onRecordHistory();
+                          setCols(Math.max(1, parseInt(e.target.value) || 1));
+                      }}
                       className="w-8 bg-transparent text-sm font-bold text-slate-900 outline-none text-center"
                       />
                   </div>
@@ -761,21 +860,36 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
                                       style={{ cursor: tool === 'select' ? 'move' : 'default' }}
                                       onMouseDown={(e) => handleBoxMouseDown(e, project.id, box.id, 'move')}
                                     />
-                                    {isSelected && tool === 'select' && !copying && [
-                                      [x1, y1], [x2, y1], [x1, y2], [x2, y2]
-                                    ].map(([hx, hy], hidx) => (
-                                      <circle 
-                                        key={hidx}
-                                        cx={hx} cy={hy} 
-                                        r={project.imageWidth / 100} // Dynamic radius based on image size
-                                        fill="white" 
-                                        stroke={color} 
-                                        strokeWidth={project.imageWidth / 300}
-                                        className="cursor-pointer"
-                                        style={{ cursor: hidx === 0 || hidx === 3 ? 'nwse-resize' : 'nesw-resize' }}
-                                        onMouseDown={(e) => handleBoxMouseDown(e, project.id, box.id, 'handle', hidx)}
-                                      />
-                                    ))}
+                                    {isSelected && tool === 'select' && !copying && (() => {
+                                      const midX = (x1 + x2) / 2;
+                                      const midY = (y1 + y2) / 2;
+                                      const handles = [
+                                        // Corners
+                                        { x: x1, y: y1, i: 0, c: 'nwse-resize' },
+                                        { x: x2, y: y1, i: 1, c: 'nesw-resize' },
+                                        { x: x1, y: y2, i: 2, c: 'nesw-resize' },
+                                        { x: x2, y: y2, i: 3, c: 'nwse-resize' },
+                                        // Edges
+                                        { x: midX, y: y1, i: 4, c: 'ns-resize' }, // Top
+                                        { x: x2, y: midY, i: 5, c: 'ew-resize' }, // Right
+                                        { x: midX, y: y2, i: 6, c: 'ns-resize' }, // Bottom
+                                        { x: x1, y: midY, i: 7, c: 'ew-resize' }, // Left
+                                      ];
+                                      
+                                      return handles.map(h => (
+                                        <circle 
+                                          key={h.i}
+                                          cx={h.x} cy={h.y} 
+                                          r={project.imageWidth / 100} // Dynamic radius based on image size
+                                          fill="white" 
+                                          stroke={color} 
+                                          strokeWidth={project.imageWidth / 300}
+                                          className="cursor-pointer"
+                                          style={{ cursor: h.c }}
+                                          onMouseDown={(e) => handleBoxMouseDown(e, project.id, box.id, 'handle', h.i)}
+                                        />
+                                      ));
+                                    })()}
                                     {showLabels && (
                                       <text
                                         x={Math.min(box.coordinate[0], box.coordinate[2])}
@@ -830,137 +944,150 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
         </div>
 
         {/* Right Sidebar */}
-        <div className="w-80 bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm flex flex-col min-h-0">
-          <div className="p-4 border-b border-slate-200 flex items-center justify-between bg-white">
-            <h3 className="text-xs font-bold text-slate-900 uppercase tracking-widest">Configuration</h3>
-          </div>
+        <div className="w-80 shrink-0 flex flex-col gap-6 min-h-0">
           
-          <div className="flex-1 overflow-y-auto p-4 space-y-6">
-            <div className="space-y-4">
-               {/* Visual Config */}
-               <div className="bg-white p-3 rounded-lg border border-slate-100">
-                 <div className="flex items-center justify-between mb-2">
-                   <label className="text-[10px] font-bold text-slate-600 uppercase tracking-wide">Box Fill Opacity</label>
-                   <span className="text-[10px] font-bold text-slate-900 tabular-nums">{Math.round(boxOpacity * 100)}%</span>
-                 </div>
-                 <div className="p-2 bg-white border border-slate-100 rounded-md">
-                   <input 
-                    type="range" min="0" max="1" step="0.05"
-                    value={boxOpacity}
-                    onChange={(e) => setBoxOpacity(parseFloat(e.target.value))}
-                    className="w-full h-1.5 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-slate-900"
-                   />
-                 </div>
-               </div>
-
-               <div className="flex items-center justify-between p-3 bg-white rounded-lg border border-slate-200 shadow-sm">
-                  <div className="flex items-center gap-2">
-                    {showLabels ? <Eye size={16} className="text-slate-900" /> : <EyeOff size={16} className="text-slate-400" />}
-                    <span className="text-xs font-bold text-slate-900 uppercase tracking-tight">Show Labels</span>
-                  </div>
-                  <button 
-                    onClick={() => setShowLabels(!showLabels)}
-                    className={`w-10 h-5 rounded-full relative transition-colors duration-200 focus:outline-none ${showLabels ? 'bg-slate-900' : 'bg-slate-200'}`}
-                  >
-                    <div className={`absolute top-1 left-1 bg-white w-3 h-3 rounded-full transition-transform duration-200 ${showLabels ? 'translate-x-5' : 'translate-x-0'}`} />
-                  </button>
-               </div>
+          {/* Panel 1: Configuration */}
+          <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm flex flex-col flex-1 min-h-0">
+            <div className="p-4 border-b border-slate-200 flex items-center justify-between bg-white">
+              <h3 className="text-xs font-bold text-slate-900 uppercase tracking-widest">Configuration</h3>
             </div>
+            
+            <div className="flex-1 overflow-y-auto p-4 space-y-6">
+              <div className="space-y-4">
+                 {/* Visual Config */}
+                 <div className="bg-white p-3 rounded-lg border border-slate-100">
+                   <div className="flex items-center justify-between mb-2">
+                     <label className="text-[10px] font-bold text-slate-600 uppercase tracking-wide">Box Fill Opacity</label>
+                     <span className="text-[10px] font-bold text-slate-900 tabular-nums">{Math.round(boxOpacity * 100)}%</span>
+                   </div>
+                   <div className="p-2 bg-white border border-slate-100 rounded-md">
+                     <input 
+                      type="range" min="0" max="1" step="0.05"
+                      value={boxOpacity}
+                      onChange={(e) => setBoxOpacity(parseFloat(e.target.value))}
+                      className="w-full h-1.5 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-slate-900"
+                     />
+                   </div>
+                 </div>
 
-            <div className="border-t border-slate-100 pt-4 bg-white">
-              {selectedBox && selectedProject ? (
-                <div className="space-y-4 animate-in fade-in slide-in-from-right-2 duration-200 bg-white">
-                    <div className="flex items-center justify-between">
-                        <h4 className="text-[10px] font-bold text-slate-900 uppercase tracking-wider">Object Properties</h4>
-                        <div className="flex items-center gap-1">
-                            <button 
-                            onClick={deleteSelectedBox}
-                            className="text-red-500 hover:text-red-700 transition-colors p-1 bg-white rounded hover:bg-red-50"
-                            title="Delete object (Del/Backspace)"
-                            >
-                            <Trash2 size={14} />
-                            </button>
-                            <button 
-                            onClick={() => setSelectedBox(null)}
-                            className="text-slate-400 hover:text-slate-600 transition-colors p-1 bg-white rounded hover:bg-slate-50"
-                            title="Deselect"
-                            >
-                            <X size={14} />
-                            </button>
-                        </div>
+                 <div className="flex items-center justify-between p-3 bg-white rounded-lg border border-slate-200 shadow-sm">
+                    <div className="flex items-center gap-2">
+                      {showLabels ? <Eye size={16} className="text-slate-900" /> : <EyeOff size={16} className="text-slate-400" />}
+                      <span className="text-xs font-bold text-slate-900 uppercase tracking-tight">Show Labels</span>
                     </div>
+                    <button 
+                      onClick={() => setShowLabels(!showLabels)}
+                      className={`w-10 h-5 rounded-full relative transition-colors duration-200 focus:outline-none ${showLabels ? 'bg-slate-900' : 'bg-slate-200'}`}
+                    >
+                      <div className={`absolute top-1 left-1 bg-white w-3 h-3 rounded-full transition-transform duration-200 ${showLabels ? 'translate-x-5' : 'translate-x-0'}`} />
+                    </button>
+                 </div>
+              </div>
 
-                    {/* Editor Fields */}
-                    {(() => {
-                        const box = selectedProject.boxes.find(b => b.id === selectedBox.boxId);
-                        if (!box) return null;
-                        return (
-                            <>
-                                <div className="grid grid-cols-2 gap-3 bg-white">
-                                    <div className="col-span-2">
-                                        <label className="text-[10px] font-bold text-slate-500 uppercase block mb-1.5">Label</label>
-                                        <input 
-                                        type="text" 
-                                        value={box.label}
-                                        onChange={(e) => updateBox(selectedBox.projectId, box.id, { label: e.target.value })}
-                                        className="w-full px-3 py-2 bg-white text-slate-900 border border-slate-300 rounded-md text-sm focus:ring-1 focus:ring-blue-500 outline-none shadow-sm"
-                                        />
-                                    </div>
-                                    <div className="col-span-2">
-                                        <label className="text-[10px] font-bold text-slate-500 uppercase block mb-1.5">Class ID</label>
-                                        <input 
-                                        type="number" 
-                                        value={box.cls_id}
-                                        onChange={(e) => updateBox(selectedBox.projectId, box.id, { cls_id: parseInt(e.target.value) || 0 })}
-                                        className="w-full px-3 py-2 bg-white text-slate-900 border border-slate-300 rounded-md text-sm focus:ring-1 focus:ring-blue-500 outline-none shadow-sm"
-                                        />
-                                    </div>
-                                </div>
-                                
-                                <div className="grid grid-cols-2 gap-3 bg-white">
-                                    <div><label className="text-[9px] font-bold text-slate-500 uppercase block mb-1">X1</label><input type="number" value={Math.round(box.coordinate[0])} onChange={(e) => { const c=[...box.coordinate] as any; c[0]=parseInt(e.target.value); updateBox(selectedBox.projectId, box.id, {coordinate: c})}} className="w-full px-2 py-1.5 border border-slate-300 rounded text-xs outline-none focus:ring-1 focus:ring-blue-500"/></div>
-                                    <div><label className="text-[9px] font-bold text-slate-500 uppercase block mb-1">Y1</label><input type="number" value={Math.round(box.coordinate[1])} onChange={(e) => { const c=[...box.coordinate] as any; c[1]=parseInt(e.target.value); updateBox(selectedBox.projectId, box.id, {coordinate: c})}} className="w-full px-2 py-1.5 border border-slate-300 rounded text-xs outline-none focus:ring-1 focus:ring-blue-500"/></div>
-                                    <div><label className="text-[9px] font-bold text-slate-500 uppercase block mb-1">X2</label><input type="number" value={Math.round(box.coordinate[2])} onChange={(e) => { const c=[...box.coordinate] as any; c[2]=parseInt(e.target.value); updateBox(selectedBox.projectId, box.id, {coordinate: c})}} className="w-full px-2 py-1.5 border border-slate-300 rounded text-xs outline-none focus:ring-1 focus:ring-blue-500"/></div>
-                                    <div><label className="text-[9px] font-bold text-slate-500 uppercase block mb-1">Y2</label><input type="number" value={Math.round(box.coordinate[3])} onChange={(e) => { const c=[...box.coordinate] as any; c[3]=parseInt(e.target.value); updateBox(selectedBox.projectId, box.id, {coordinate: c})}} className="w-full px-2 py-1.5 border border-slate-300 rounded text-xs outline-none focus:ring-1 focus:ring-blue-500"/></div>
-                                </div>
-                            </>
-                        );
-                    })()}
-                </div>
-              ) : (
-                <div className="h-full flex flex-col items-center justify-center text-center opacity-50 py-8 bg-white">
-                  <Icons.Move size={32} className="text-slate-300 mb-2" />
-                  <p className="text-[11px] text-slate-500 font-semibold px-4">Select an object in any grid cell to edit its properties</p>
-                </div>
-              )}
+              <div className="border-t border-slate-100 pt-4 bg-white">
+                {selectedBox && selectedProject ? (
+                  <div className="space-y-4 animate-in fade-in slide-in-from-right-2 duration-200 bg-white">
+                      <div className="flex items-center justify-between">
+                          <h4 className="text-[10px] font-bold text-slate-900 uppercase tracking-wider">Object Properties</h4>
+                          <div className="flex items-center gap-1">
+                              <button 
+                              onClick={() => {
+                                  if(onRecordHistory) onRecordHistory();
+                                  deleteSelectedBox();
+                              }}
+                              className="text-red-500 hover:text-red-700 transition-colors p-1 bg-white rounded hover:bg-red-50"
+                              title="Delete object (Del/Backspace)"
+                              >
+                              <Trash2 size={14} />
+                              </button>
+                              <button 
+                              onClick={() => setSelectedBox(null)}
+                              className="text-slate-400 hover:text-slate-600 transition-colors p-1 bg-white rounded hover:bg-slate-50"
+                              title="Deselect"
+                              >
+                              <X size={14} />
+                              </button>
+                          </div>
+                      </div>
+
+                      {/* Editor Fields */}
+                      {(() => {
+                          const box = selectedProject.boxes.find(b => b.id === selectedBox.boxId);
+                          if (!box) return null;
+                          return (
+                              <>
+                                  <div className="grid grid-cols-2 gap-3 bg-white">
+                                      <div className="col-span-2">
+                                          <label className="text-[10px] font-bold text-slate-500 uppercase block mb-1.5">Label</label>
+                                          <input 
+                                          type="text" 
+                                          value={box.label}
+                                          onChange={(e) => {
+                                              if(onRecordHistory) onRecordHistory();
+                                              updateBox(selectedBox.projectId, box.id, { label: e.target.value })
+                                          }}
+                                          className="w-full px-3 py-2 bg-white text-slate-900 border border-slate-300 rounded-md text-sm focus:ring-1 focus:ring-blue-500 outline-none shadow-sm"
+                                          />
+                                      </div>
+                                      <div className="col-span-2">
+                                          <label className="text-[10px] font-bold text-slate-500 uppercase block mb-1.5">Class ID</label>
+                                          <input 
+                                          type="number" 
+                                          value={box.cls_id}
+                                          onChange={(e) => {
+                                              if(onRecordHistory) onRecordHistory();
+                                              updateBox(selectedBox.projectId, box.id, { cls_id: parseInt(e.target.value) || 0 })
+                                          }}
+                                          className="w-full px-3 py-2 bg-white text-slate-900 border border-slate-300 rounded-md text-sm focus:ring-1 focus:ring-blue-500 outline-none shadow-sm"
+                                          />
+                                      </div>
+                                  </div>
+                                  
+                                  <div className="grid grid-cols-2 gap-3 bg-white">
+                                      <div><label className="text-[9px] font-bold text-slate-500 uppercase block mb-1">X1</label><input type="number" value={Math.round(box.coordinate[0])} onChange={(e) => { if(onRecordHistory) onRecordHistory(); const c=[...box.coordinate] as any; c[0]=parseInt(e.target.value); updateBox(selectedBox.projectId, box.id, {coordinate: c})}} className="w-full px-2 py-1.5 border border-slate-300 rounded text-xs outline-none focus:ring-1 focus:ring-blue-500"/></div>
+                                      <div><label className="text-[9px] font-bold text-slate-500 uppercase block mb-1">Y1</label><input type="number" value={Math.round(box.coordinate[1])} onChange={(e) => { if(onRecordHistory) onRecordHistory(); const c=[...box.coordinate] as any; c[1]=parseInt(e.target.value); updateBox(selectedBox.projectId, box.id, {coordinate: c})}} className="w-full px-2 py-1.5 border border-slate-300 rounded text-xs outline-none focus:ring-1 focus:ring-blue-500"/></div>
+                                      <div><label className="text-[9px] font-bold text-slate-500 uppercase block mb-1">X2</label><input type="number" value={Math.round(box.coordinate[2])} onChange={(e) => { if(onRecordHistory) onRecordHistory(); const c=[...box.coordinate] as any; c[2]=parseInt(e.target.value); updateBox(selectedBox.projectId, box.id, {coordinate: c})}} className="w-full px-2 py-1.5 border border-slate-300 rounded text-xs outline-none focus:ring-1 focus:ring-blue-500"/></div>
+                                      <div><label className="text-[9px] font-bold text-slate-500 uppercase block mb-1">Y2</label><input type="number" value={Math.round(box.coordinate[3])} onChange={(e) => { if(onRecordHistory) onRecordHistory(); const c=[...box.coordinate] as any; c[3]=parseInt(e.target.value); updateBox(selectedBox.projectId, box.id, {coordinate: c})}} className="w-full px-2 py-1.5 border border-slate-300 rounded text-xs outline-none focus:ring-1 focus:ring-blue-500"/></div>
+                                  </div>
+                              </>
+                          );
+                      })()}
+                  </div>
+                ) : (
+                  <div className="h-full flex flex-col items-center justify-center text-center opacity-50 py-8 bg-white">
+                    <Icons.Move size={32} className="text-slate-300 mb-2" />
+                    <p className="text-[11px] text-slate-500 font-semibold px-4">Select an object in any grid cell to edit its properties</p>
+                  </div>
+                )}
+              </div>
             </div>
+          </div>
 
-            {/* Entity List for Context */}
-            <div className="border-t border-slate-100 pt-4 flex-1 flex flex-col min-h-0">
-                <div className="flex items-center justify-between mb-2">
-                    <h3 className="text-[10px] font-bold text-slate-900 uppercase tracking-widest">
-                        {selectedProject ? 'Entity List (Current)' : 'Entity List'}
-                    </h3>
-                    <span className="text-[10px] bg-slate-900 text-white px-1.5 py-0.5 rounded font-bold">
-                        {selectedProject ? selectedProject.boxes.length : '-'}
-                    </span>
-                </div>
-                <div className="flex-1 overflow-y-auto bg-slate-50 rounded-lg border border-slate-200">
-                    {selectedProject ? (
-                        selectedProject.boxes.map((box) => (
-                            <div 
-                                key={box.id}
-                                onClick={() => setSelectedBox({ projectId: selectedProject.id, boxId: box.id })}
-                                className={`flex items-center gap-3 px-3 py-2 cursor-pointer border-l-2 transition-colors ${selectedBox?.boxId === box.id ? 'bg-white border-blue-500 shadow-sm' : 'border-transparent hover:bg-slate-100'}`}
-                            >
-                                <div className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: COLORS[box.cls_id % COLORS.length] }} />
-                                <span className={`text-[10px] font-medium flex-1 truncate ${selectedBox?.boxId === box.id ? 'text-slate-900' : 'text-slate-500'}`}>{box.label}</span>
-                            </div>
-                        ))
-                    ) : (
-                        <div className="p-4 text-center text-[10px] text-slate-400 italic">Select an object to view project entities</div>
-                    )}
-                </div>
+          {/* Panel 2: Entity List */}
+          <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm flex flex-col h-48 min-h-0">
+            <div className="p-3 border-b border-slate-200 flex items-center justify-between bg-white">
+                <h3 className="text-[10px] font-bold text-slate-900 uppercase tracking-widest">
+                    {selectedProject ? 'Entity List (Current)' : 'Entity List'}
+                </h3>
+                <span className="text-[10px] bg-slate-900 text-white px-1.5 py-0.5 rounded font-bold">
+                    {selectedProject ? selectedProject.boxes.length : '-'}
+                </span>
+            </div>
+            <div className="flex-1 overflow-y-auto bg-slate-50">
+                {selectedProject ? (
+                    selectedProject.boxes.map((box) => (
+                        <div 
+                            key={box.id}
+                            onClick={() => setSelectedBox({ projectId: selectedProject.id, boxId: box.id })}
+                            className={`flex items-center gap-3 px-3 py-2 cursor-pointer border-l-2 transition-colors ${selectedBox?.boxId === box.id ? 'bg-white border-blue-500 shadow-sm' : 'border-transparent hover:bg-slate-100'}`}
+                        >
+                            <div className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: COLORS[box.cls_id % COLORS.length] }} />
+                            <span className={`text-[10px] font-medium flex-1 truncate ${selectedBox?.boxId === box.id ? 'text-slate-900' : 'text-slate-500'}`}>{box.label}</span>
+                        </div>
+                    ))
+                ) : (
+                    <div className="p-4 text-center text-[10px] text-slate-400 italic">Select an object to view project entities</div>
+                )}
             </div>
           </div>
         </div>

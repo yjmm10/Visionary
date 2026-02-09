@@ -26,9 +26,17 @@ const App: React.FC = () => {
 
   // Clipboard State for Project Copy/Paste
   const [clipboard, setClipboard] = useState<Project | null>(null);
+  // Clipboard State for Box Copy/Paste
+  const [boxClipboard, setBoxClipboard] = useState<Box | null>(null);
 
   // Snapshots State
   const [snapshots, setSnapshots] = useState<Snapshot[]>([]);
+
+  // --- History State (Undo/Redo) ---
+  const [history, setHistory] = useState<{ past: AppState[], future: AppState[] }>({
+    past: [],
+    future: []
+  });
 
   // Persistence
   useEffect(() => {
@@ -74,11 +82,84 @@ const App: React.FC = () => {
       localStorage.setItem(SNAPSHOTS_KEY, JSON.stringify(snapshots));
     } catch (e) {
       console.warn("Failed to save snapshots to localStorage.", e);
-      // We don't alert here to avoid spamming, but we do alert in createQuickSnapshot if it fails immediately
     }
   }, [snapshots]);
 
-  // Global Keyboard Shortcuts for Copy/Paste
+  // --- Undo/Redo Logic ---
+  const recordHistory = useCallback(() => {
+    setHistory(prev => {
+      const currentState: AppState = {
+        projects: JSON.parse(JSON.stringify(projects)), // Deep copy
+        activeProjectId,
+        mergeQueue: [...mergeQueue],
+        rows,
+        cols,
+        boxOpacity,
+        showLabels,
+        view
+      };
+      
+      const newPast = [...prev.past, currentState];
+      // Limit history size to 50 steps
+      if (newPast.length > 50) newPast.shift();
+
+      return {
+        past: newPast,
+        future: [] // Clear future on new action
+      };
+    });
+  }, [projects, activeProjectId, mergeQueue, rows, cols, boxOpacity, showLabels, view]);
+
+  const handleUndo = useCallback(() => {
+    setHistory(prev => {
+      if (prev.past.length === 0) return prev;
+
+      const previous = prev.past[prev.past.length - 1];
+      const newPast = prev.past.slice(0, -1);
+      
+      const current: AppState = { projects, activeProjectId, mergeQueue, rows, cols, boxOpacity, showLabels, view };
+
+      // Restore State
+      setProjects(previous.projects);
+      if (previous.activeProjectId) setActiveProjectId(previous.activeProjectId);
+      setMergeQueue(previous.mergeQueue);
+      setRows(previous.rows);
+      setCols(previous.cols);
+      // We don't necessarily undo visual preferences like opacity/view, but we can if we want full state restore.
+      // For editing flow, keeping current view is usually better, but let's follow the snapshot logic for consistency.
+      
+      return {
+        past: newPast,
+        future: [current, ...prev.future]
+      };
+    });
+  }, [projects, activeProjectId, mergeQueue, rows, cols, boxOpacity, showLabels, view]);
+
+  const handleRedo = useCallback(() => {
+    setHistory(prev => {
+      if (prev.future.length === 0) return prev;
+
+      const next = prev.future[0];
+      const newFuture = prev.future.slice(1);
+      
+      const current: AppState = { projects, activeProjectId, mergeQueue, rows, cols, boxOpacity, showLabels, view };
+
+      // Restore State
+      setProjects(next.projects);
+      if (next.activeProjectId) setActiveProjectId(next.activeProjectId);
+      setMergeQueue(next.mergeQueue);
+      setRows(next.rows);
+      setCols(next.cols);
+
+      return {
+        past: [...prev.past, current],
+        future: newFuture
+      };
+    });
+  }, [projects, activeProjectId, mergeQueue, rows, cols, boxOpacity, showLabels, view]);
+
+
+  // Global Keyboard Shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (document.activeElement?.tagName === 'INPUT' || document.activeElement?.tagName === 'TEXTAREA') {
@@ -87,8 +168,21 @@ const App: React.FC = () => {
 
       const isCmdOrCtrl = e.metaKey || e.ctrlKey;
 
-      // COPY: Cmd+C
-      if (isCmdOrCtrl && e.key === 'c') {
+      // Undo: Cmd+Z
+      if (isCmdOrCtrl && e.key.toLowerCase() === 'z' && !e.shiftKey) {
+        e.preventDefault();
+        handleUndo();
+      }
+
+      // Redo: Cmd+Shift+Z or Ctrl+Y
+      if ((isCmdOrCtrl && e.key.toLowerCase() === 'z' && e.shiftKey) || (isCmdOrCtrl && e.key.toLowerCase() === 'y')) {
+        e.preventDefault();
+        handleRedo();
+      }
+
+      // COPY: Cmd+C (Project Level)
+      // Note: Child components (Editors) will stopPropagation if they handle Box Copy
+      if (isCmdOrCtrl && e.key.toLowerCase() === 'c') {
         if (activeProjectId) {
           const projectToCopy = projects.find(p => p.id === activeProjectId);
           if (projectToCopy) {
@@ -97,10 +191,12 @@ const App: React.FC = () => {
         }
       }
 
-      // PASTE: Cmd+V
-      if (isCmdOrCtrl && e.key === 'v') {
+      // PASTE: Cmd+V (Project Level)
+      // Note: Child components will stopPropagation if they handle Box Paste
+      if (isCmdOrCtrl && e.key.toLowerCase() === 'v') {
         if (clipboard) {
           e.preventDefault();
+          recordHistory(); // Save state before paste
           
           const newId = `proj-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`;
           const newBoxes = clipboard.boxes.map((box, idx) => ({
@@ -144,11 +240,12 @@ const App: React.FC = () => {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [activeProjectId, clipboard, projects, rows, cols]);
+  }, [activeProjectId, clipboard, projects, rows, cols, recordHistory, handleUndo, handleRedo]);
 
   const activeProject = projects.find(p => p.id === activeProjectId);
 
   const handleUpload = (newProjects: Project[]) => {
+    recordHistory();
     setProjects(prev => [...prev, ...newProjects]);
     if (!activeProjectId && newProjects.length > 0) {
       setActiveProjectId(newProjects[0].id);
@@ -179,21 +276,24 @@ const App: React.FC = () => {
 
   const setImageForProject = (url: string | undefined, w: number, h: number) => {
     if (!activeProjectId) return;
+    recordHistory();
     setProjects(prev => prev.map(p => p.id === activeProjectId ? { ...p, imageUrl: url, imageWidth: w, imageHeight: h } : p));
   };
 
   const deleteProject = (id: string) => {
-    // Sandbox blocks confirm(), so we execute immediately
+    recordHistory();
     setProjects(prev => prev.filter(p => p.id !== id));
     setMergeQueue(prev => prev.map(mid => mid === id ? null : mid));
     if (activeProjectId === id) setActiveProjectId(null);
   };
 
   const renameProject = (id: string, newName: string) => {
+    recordHistory();
     setProjects(prev => prev.map(p => p.id === id ? { ...p, input_path: newName } : p));
   };
 
   const toggleInMerge = (id: string) => {
+    recordHistory();
     if (mergeQueue.includes(id)) {
       setMergeQueue(prev => prev.map(mid => mid === id ? null : mid));
     } else {
@@ -211,6 +311,7 @@ const App: React.FC = () => {
   };
 
   const handleReorderMerge = (newIds: (string | null)[]) => {
+    recordHistory();
     setMergeQueue(newIds);
   };
 
@@ -241,6 +342,7 @@ const App: React.FC = () => {
     const reader = new FileReader();
     reader.onload = (e) => {
       try {
+        recordHistory();
         const json = JSON.parse(e.target?.result as string);
         const data = json.state || json;
         restoreState(data);
@@ -257,8 +359,6 @@ const App: React.FC = () => {
   const createQuickSnapshot = (name: string) => {
     if (name) {
       try {
-        // IMPORTANT: Deep copy the state to avoid reference issues where
-        // future mutations to 'projects' inadvertently change the saved snapshot.
         const currentState = { projects, activeProjectId, mergeQueue, rows, cols, boxOpacity, showLabels, view };
         const deepCopiedState = JSON.parse(JSON.stringify(currentState));
 
@@ -269,7 +369,6 @@ const App: React.FC = () => {
           state: deepCopiedState
         };
         
-        // Test save to ensure quota isn't exceeded before updating state
         const potentialNewSnapshots = [newSnapshot, ...snapshots];
         const stringified = JSON.stringify(potentialNewSnapshots);
         
@@ -287,11 +386,8 @@ const App: React.FC = () => {
   };
 
   const restoreQuickSnapshot = (snapshot: Snapshot) => {
-    // Sandbox blocks confirm(), so we restore immediately. 
-    // In a production app, we would use a custom modal here.
     try {
-        // Deep copy again on restore to ensure the snapshot remains pristine
-        // even if the restored state is later mutated.
+        recordHistory();
         const stateToRestore = JSON.parse(JSON.stringify(snapshot.state));
         restoreState(stateToRestore);
     } catch(e) {
@@ -331,6 +427,10 @@ const App: React.FC = () => {
         onCreateSnapshot={createQuickSnapshot}
         onRestoreSnapshot={restoreQuickSnapshot}
         onDeleteSnapshot={deleteQuickSnapshot}
+        onUndo={handleUndo}
+        onRedo={handleRedo}
+        canUndo={history.past.length > 0}
+        canRedo={history.future.length > 0}
       />
 
       <main className="flex-1 flex flex-col relative overflow-hidden">
@@ -374,6 +474,9 @@ const App: React.FC = () => {
                 setBoxOpacity={setBoxOpacity}
                 showLabels={showLabels}
                 setShowLabels={setShowLabels}
+                onRecordHistory={recordHistory}
+                boxClipboard={boxClipboard}
+                onCopyBox={setBoxClipboard}
               />
             ) : (
               <div className="h-full flex flex-col items-center justify-center bg-white border border-slate-200 rounded-2xl shadow-sm text-center p-12">
@@ -399,6 +502,9 @@ const App: React.FC = () => {
               setBoxOpacity={setBoxOpacity}
               showLabels={showLabels}
               setShowLabels={setShowLabels}
+              onRecordHistory={recordHistory}
+              boxClipboard={boxClipboard}
+              onCopyBox={setBoxClipboard}
             />
           )}
         </div>
