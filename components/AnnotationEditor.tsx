@@ -219,33 +219,33 @@ const AnnotationEditor: React.FC<AnnotationEditorProps> = ({
               if (!e.altKey) {
                   const snapped = getSnappedCoordinates({ ...box, coordinate: nextCoords }, project.boxes, 5 / zoom);
                   
-                  // Anti-Stick Logic:
-                  // If the snap pulls us in the opposite direction of our movement, ignore it.
-                  // This allows moving "out" of a snap line easily.
+                  // Anti-Stick & Directional Snap Logic:
+                  // 1. If snap opposes movement, reject it (Anti-Stick).
+                  // 2. If we are moving ONLY horizontally (dy=0), REJECT vertical snaps.
+                  // 3. If we are moving ONLY vertically (dx=0), REJECT horizontal snaps.
                   
                   const [sx1, sy1, sx2, sy2] = snapped.nextCoords;
                   const [rx1, ry1, rx2, ry2] = nextCoords;
 
                   // Check X axis snap
-                  // We compare the shift of the center or edges. 
-                  // Since we move the whole box, checking x1 shift is sufficient.
                   const snapDiffX = sx1 - rx1;
-                  if (dx !== 0 && snapDiffX !== 0 && (snapDiffX * dx < 0)) {
-                      // Snap opposes movement, reject X snap
-                      // Revert X coords to raw
+                  // Reject if:
+                  // - We are NOT moving horizontally (dx=0) -> Don't snap X
+                  // - Snap opposes movement (Anti-Stick)
+                  if (dx === 0 || (snapDiffX !== 0 && (snapDiffX * dx < 0))) {
                       snapped.nextCoords[0] = rx1;
                       snapped.nextCoords[2] = rx2;
-                      // Remove vertical snap lines
                       snapped.lines = snapped.lines.filter(l => l.type !== 'vertical');
                   }
 
                   // Check Y axis snap
                   const snapDiffY = sy1 - ry1;
-                  if (dy !== 0 && snapDiffY !== 0 && (snapDiffY * dy < 0)) {
-                      // Snap opposes movement, reject Y snap
+                  // Reject if:
+                  // - We are NOT moving vertically (dy=0) -> Don't snap Y
+                  // - Snap opposes movement (Anti-Stick)
+                  if (dy === 0 || (snapDiffY !== 0 && (snapDiffY * dy < 0))) {
                       snapped.nextCoords[1] = ry1;
                       snapped.nextCoords[3] = ry2;
-                      // Remove horizontal snap lines
                       snapped.lines = snapped.lines.filter(l => l.type !== 'horizontal');
                   }
 
@@ -461,7 +461,25 @@ const AnnotationEditor: React.FC<AnnotationEditorProps> = ({
     let nextCoords: [number, number, number, number] = [x1, y1, x2, y2];
 
     if (dragInfo.type === 'move') {
-      let rawNextCoords: [number, number, number, number] = [x1 + dx, y1 + dy, x2 + dx, y2 + dy];
+      let constrainedDx = dx;
+      let constrainedDy = dy;
+
+      // Shift key constrains movement to horizontal or vertical axis
+      if (e.shiftKey) {
+          // Determine dominant axis
+          if (Math.abs(dx) > Math.abs(dy)) {
+              constrainedDy = 0; // Lock Y, move X only
+          } else {
+              constrainedDx = 0; // Lock X, move Y only
+          }
+      }
+
+      let rawNextCoords: [number, number, number, number] = [
+          x1 + constrainedDx, 
+          y1 + constrainedDy, 
+          x2 + constrainedDx, 
+          y2 + constrainedDy
+      ];
       
       // Apply Snapping
       const snapped = getSnappedCoordinates(
@@ -470,6 +488,27 @@ const AnnotationEditor: React.FC<AnnotationEditorProps> = ({
           5 / visualScale
       );
       
+      // If Shift is held, we must RE-ENFORCE the constraint AFTER snapping
+      // Snapping might try to pull us off-axis, which we don't want if Shift is held.
+      if (e.shiftKey) {
+          if (constrainedDy === 0) {
+              // We are moving horizontally.
+              // Force Y to remain at original Y (y1, y2)
+              // We can allow X snapping, but Y must be reset.
+              snapped.nextCoords[1] = y1;
+              snapped.nextCoords[3] = y2;
+              // Remove horizontal snap lines (since we are not snapping Y)
+              snapped.lines = snapped.lines.filter(l => l.type !== 'horizontal');
+          } else {
+              // We are moving vertically.
+              // Force X to remain at original X (x1, x2)
+              snapped.nextCoords[0] = x1;
+              snapped.nextCoords[2] = x2;
+              // Remove vertical snap lines
+              snapped.lines = snapped.lines.filter(l => l.type !== 'vertical');
+          }
+      }
+
       nextCoords = snapped.nextCoords;
       setSnapLines(snapped.lines);
 

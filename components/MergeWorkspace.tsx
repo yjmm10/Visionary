@@ -360,21 +360,27 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
                       if (!e.altKey) {
                           const snapped = getSnappedCoordinates(projectId, boxId, nextAbsCoords, 5 / zoom);
                           
-                          // Anti-Stick Logic
+                          // Anti-Stick & Directional Snap Logic
                           const sx1 = snapped.nextAbsCoords.x1;
                           const sy1 = snapped.nextAbsCoords.y1;
                           const rx1 = nextAbsCoords.x1;
                           const ry1 = nextAbsCoords.y1;
 
                           const snapDiffX = sx1 - rx1;
-                          if (dx !== 0 && snapDiffX !== 0 && (snapDiffX * dx < 0)) { // Check against original dx direction
+                          // Reject if:
+                          // - We are NOT moving horizontally (dx=0) -> Don't snap X
+                          // - Snap opposes movement (Anti-Stick)
+                          if (dx === 0 || (snapDiffX !== 0 && (snapDiffX * dx < 0))) { 
                               snapped.nextAbsCoords.x1 = rx1;
                               snapped.nextAbsCoords.x2 = nextAbsCoords.x2;
                               snapped.lines = snapped.lines.filter(l => l.type !== 'vertical');
                           }
 
                           const snapDiffY = sy1 - ry1;
-                          if (dy !== 0 && snapDiffY !== 0 && (snapDiffY * dy < 0)) {
+                          // Reject if:
+                          // - We are NOT moving vertically (dy=0) -> Don't snap Y
+                          // - Snap opposes movement (Anti-Stick)
+                          if (dy === 0 || (snapDiffY !== 0 && (snapDiffY * dy < 0))) {
                               snapped.nextAbsCoords.y1 = ry1;
                               snapped.nextAbsCoords.y2 = nextAbsCoords.y2;
                               snapped.lines = snapped.lines.filter(l => l.type !== 'horizontal');
@@ -417,15 +423,18 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
              e.stopPropagation(); // Stop propagation to App
              if (onRecordHistory) onRecordHistory();
 
-             const offsetAmt = 30;
+             const width = Math.abs(boxClipboard.coordinate[2] - boxClipboard.coordinate[0]);
+             const height = Math.abs(boxClipboard.coordinate[3] - boxClipboard.coordinate[1]);
+             const margin = 10;
+
              const newBox: Box = {
                 ...boxClipboard,
                 id: `box-copy-${Date.now()}-${Math.random().toString(36).substr(2,5)}`,
                 coordinate: [
-                    boxClipboard.coordinate[0] + offsetAmt,
-                    boxClipboard.coordinate[1] + offsetAmt,
-                    boxClipboard.coordinate[2] + offsetAmt,
-                    boxClipboard.coordinate[3] + offsetAmt
+                    boxClipboard.coordinate[0], // Keep X alignment
+                    boxClipboard.coordinate[3] + margin, // Place below (Y2 + margin)
+                    boxClipboard.coordinate[2], // Keep Width (X2)
+                    boxClipboard.coordinate[3] + margin + height // Y2 + margin + height
                 ]
             };
 
@@ -647,13 +656,55 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
         let nextCoords: [number, number, number, number] = [x1, y1, x2, y2];
 
         if (boxDrag.type === 'move') {
-            const rawNextCoords: [number, number, number, number] = [x1 + dx, y1 + dy, x2 + dx, y2 + dy];
+            let constrainedDx = dx;
+            let constrainedDy = dy;
+
+            // Shift key constrains movement to horizontal or vertical axis
+            if (e.shiftKey) {
+                if (Math.abs(dx) > Math.abs(dy)) {
+                    constrainedDy = 0;
+                } else {
+                    constrainedDx = 0;
+                }
+            }
+
+            const rawNextCoords: [number, number, number, number] = [
+                x1 + constrainedDx, 
+                y1 + constrainedDy, 
+                x2 + constrainedDx, 
+                y2 + constrainedDy
+            ];
             
             // Convert to absolute for snapping
             const absCoords = getAbsoluteBoxCoords(boxDrag.projectId, { ...project.boxes.find(b => b.id === boxDrag.boxId)!, coordinate: rawNextCoords });
             
             if (absCoords) {
                 const snapped = getSnappedCoordinates(boxDrag.projectId, boxDrag.boxId, absCoords, 5 / zoom);
+                
+                // Re-enforce Shift constraint after snapping
+                if (e.shiftKey) {
+                    // We need to check constraints in LOCAL space or ensure absolute snap respects it.
+                    // Easier to just reset the non-moving axis in the final result.
+                    // But wait, snapped returns absolute coords.
+                    
+                    // Let's convert the original constrained coords to absolute to see where we SHOULD be on the locked axis
+                    const idealAbs = getAbsoluteBoxCoords(boxDrag.projectId, { ...project.boxes.find(b => b.id === boxDrag.boxId)!, coordinate: rawNextCoords });
+                    
+                    if (idealAbs) {
+                        if (constrainedDy === 0) {
+                            // Moving Horizontally. Lock Y.
+                            snapped.nextAbsCoords.y1 = idealAbs.y1;
+                            snapped.nextAbsCoords.y2 = idealAbs.y2;
+                            snapped.lines = snapped.lines.filter(l => l.type !== 'horizontal');
+                        } else {
+                            // Moving Vertically. Lock X.
+                            snapped.nextAbsCoords.x1 = idealAbs.x1;
+                            snapped.nextAbsCoords.x2 = idealAbs.x2;
+                            snapped.lines = snapped.lines.filter(l => l.type !== 'vertical');
+                        }
+                    }
+                }
+
                 setSnapLines(snapped.lines);
                 
                 // Convert back to local

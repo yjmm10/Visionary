@@ -246,10 +246,12 @@ const Sidebar: React.FC<SidebarProps> = ({
                             tabIndex={0} // Make focusable for delete shortcut
                             onKeyDown={(e) => handleKeyDownItem(e, p.id)}
                             onClick={() => {
+                              onSelect(p.id);
+                            }}
+                            onDoubleClick={() => {
                               setView('editor');
                               onSelect(p.id);
                             }}
-                            onDoubleClick={(e) => handleStartRename(e, p)}
                             className={`group relative flex items-center gap-2 px-2 py-2 rounded-md cursor-pointer border transition-all duration-200 outline-none focus:ring-2 focus:ring-blue-200 ${activeId === p.id ? 'bg-blue-50 border-blue-100 shadow-sm' : 'bg-transparent border-transparent hover:bg-slate-50'}`}
                           >
                             <div className={`w-1.5 h-1.5 rounded-full shrink-0 ${activeId === p.id ? 'bg-blue-500' : 'bg-slate-300'}`} />
@@ -284,7 +286,7 @@ const Sidebar: React.FC<SidebarProps> = ({
                                     <button 
                                         onClick={(e) => handleStartRename(e, p)}
                                         className="p-1 hover:bg-slate-200 text-slate-400 hover:text-slate-700 rounded mr-1"
-                                        title="Rename (Double Click)"
+                                        title="Rename"
                                     >
                                         <Edit2 size={12} />
                                     </button>
