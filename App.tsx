@@ -546,6 +546,7 @@ const App: React.FC = () => {
               boxClipboard={boxClipboard}
               onCopyBox={setBoxClipboard}
               onDuplicateProject={duplicateProject}
+              onSelectProject={setActiveProjectId}
             />
           )}
         </div>

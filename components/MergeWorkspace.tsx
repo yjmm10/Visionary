@@ -26,6 +26,7 @@ interface MergeWorkspaceProps {
   boxClipboard?: Box | null;
   onCopyBox?: (box: Box) => void;
   onDuplicateProject?: (projectId: string) => string | null;
+  onSelectProject?: (projectId: string) => void;
 }
 
 const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({ 
@@ -47,7 +48,8 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
   onRecordHistory,
   boxClipboard,
   onCopyBox,
-  onDuplicateProject
+  onDuplicateProject,
+  onSelectProject
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
@@ -57,6 +59,19 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
   // Transform State
   const [zoom, setZoom] = useState(1);
   const [offset, setOffset] = useState({ x: 0, y: 0 });
+  
+  // Refs for event handlers to access latest state without re-binding
+  const offsetRef = useRef(offset);
+  const zoomRef = useRef(zoom);
+
+  useEffect(() => {
+    offsetRef.current = offset;
+  }, [offset]);
+
+  useEffect(() => {
+    zoomRef.current = zoom;
+  }, [zoom]);
+
   const [tool, setTool] = useState<'select' | 'hand' | 'draw'>('select');
   const [isPanning, setIsPanning] = useState(false);
   const [panStart, setPanStart] = useState<{ x: number, y: number } | null>(null);
@@ -498,10 +513,45 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
       if (e.ctrlKey || e.metaKey) {
         e.preventDefault();
         const delta = e.deltaY > 0 ? -0.15 : 0.15;
-        setZoom(prev => {
-          const next = Math.min(5, Math.max(0.01, prev + delta * prev));
-          return parseFloat(next.toFixed(4));
-        });
+        
+        // Use refs to get latest state
+        const currentZoom = zoomRef.current;
+        const currentOffset = offsetRef.current;
+
+        const nextZoom = Math.min(5, Math.max(0.01, currentZoom + delta * currentZoom));
+        
+        // Calculate mouse position relative to the container
+        const rect = container.getBoundingClientRect();
+        const mouseX = e.clientX - rect.left;
+        const mouseY = e.clientY - rect.top;
+
+        // Calculate the point in content space that is currently under the mouse
+        // (mouseX - offset.x) / prevZoom = contentX
+        const contentX = (mouseX - currentOffset.x) / currentZoom;
+        const contentY = (mouseY - currentOffset.y) / currentZoom;
+
+        // Calculate target screen position
+        // If zooming IN (delta > 0), drift the focal point towards the center of the container
+        let targetScreenX = mouseX;
+        let targetScreenY = mouseY;
+
+        if (delta > 0) {
+            const centerX = rect.width / 2;
+            const centerY = rect.height / 2;
+            const driftFactor = 0.1; // Adjust this factor to control the speed of centering (0.1 = 10% per step)
+            
+            targetScreenX = mouseX + (centerX - mouseX) * driftFactor;
+            targetScreenY = mouseY + (centerY - mouseY) * driftFactor;
+        }
+
+        // Calculate new offset to place the content point at the target screen position
+        // targetScreenX - (contentX * nextZoom) = newOffset.x
+        const newOffsetX = targetScreenX - (contentX * nextZoom);
+        const newOffsetY = targetScreenY - (contentY * nextZoom);
+
+        // Batch updates
+        setOffset({ x: newOffsetX, y: newOffsetY });
+        setZoom(parseFloat(nextZoom.toFixed(4)));
       }
     };
 
@@ -1334,6 +1384,7 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
                           onMouseDown={(e) => {
                             if (tool === 'select') {
                                setSelectedBox(null);
+                               if (project && onSelectProject) onSelectProject(project.id);
                             }
                           }}
                           style={{ 
@@ -1384,7 +1435,10 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
                                           strokeWidth={project.imageWidth / 200}
                                           strokeOpacity={1}
                                           style={{ cursor: tool === 'select' ? 'move' : 'default' }}
-                                          onMouseDown={(e) => handleBoxMouseDown(e, project.id, box.id, 'move')}
+                                          onMouseDown={(e) => {
+                                            handleBoxMouseDown(e, project.id, box.id, 'move');
+                                            if (onSelectProject) onSelectProject(project.id);
+                                          }}
                                         />
                                         {isSelected && tool === 'select' && !copying && (() => {
                                           const midX = (x1 + x2) / 2;
@@ -1412,7 +1466,10 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
                                               strokeWidth={project.imageWidth / 300}
                                               className="cursor-pointer"
                                               style={{ cursor: h.c }}
-                                              onMouseDown={(e) => handleBoxMouseDown(e, project.id, box.id, 'handle', h.i)}
+                                              onMouseDown={(e) => {
+                                                handleBoxMouseDown(e, project.id, box.id, 'handle', h.i);
+                                                if (onSelectProject) onSelectProject(project.id);
+                                              }}
                                             />
                                           ));
                                         })()}
