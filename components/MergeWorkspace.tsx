@@ -22,6 +22,7 @@ interface MergeWorkspaceProps {
   onRecordHistory?: () => void;
   boxClipboard?: Box | null;
   onCopyBox?: (box: Box) => void;
+  onDuplicateProject?: (projectId: string) => string | null;
 }
 
 const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({ 
@@ -40,7 +41,8 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
   setShowLabels,
   onRecordHistory,
   boxClipboard,
-  onCopyBox
+  onCopyBox,
+  onDuplicateProject
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
@@ -480,16 +482,140 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
   }, []);
 
   useEffect(() => {
+    // Only reorder if the total slots have changed significantly or if we need to fill empty slots
+    // We want to PRESERVE the existing layout as much as possible when resizing.
+    
     if (mergeQueue.length !== totalSlots) {
       const newQueue = [...mergeQueue];
+      
       if (newQueue.length < totalSlots) {
+        // Growing: Just append nulls
         while (newQueue.length < totalSlots) newQueue.push(null);
       } else {
-        newQueue.splice(totalSlots);
+        // Shrinking: We must be careful.
+        // If we reduce cols, items at the end of rows might get shifted or cut.
+        // The simplest approach for "shrinking" is just slicing, which effectively "cuts off" the bottom/right.
+        // However, if we change columns, the 1D array mapping changes the visual position of items.
+        // To keep items "visually" in place when changing columns is hard with a 1D array without inserting gaps.
+        // But the user request specifically says "when increasing rows/cols, keep original position".
+        // Slicing handles the "keep original position" for the remaining items in the 1D array, 
+        // BUT changing 'cols' changes the visual row wrapping.
+        
+        // If we want to strictly preserve visual position (row, col) when changing grid dimensions:
+        // We need to map old (r,c) to new index.
+        
+        // Let's detect if this is a resize operation by comparing with previous props (not available easily in effect)
+        // But we can infer.
+        
+        // Actually, the standard behavior of a 1D array flow is that increasing columns pulls items up.
+        // The user wants "expand right/down".
+        // This implies that if I have [A, B] in a 2x1 grid (A at 0,0; B at 0,1)
+        // And I change to 3x1, it should be [A, B, null]. This is default array behavior.
+        // BUT if I have [A, B] in a 1x2 grid (A at 0,0; B at 1,0)
+        // And I change to 2x2.
+        // Old: Row 0: [A], Row 1: [B]. Array: [A, B]
+        // New: Row 0: [A, ?], Row 1: [?, ?].
+        // If we just keep [A, B], New Layout is: Row 0: [A, B]. B moved from (1,0) to (0,1).
+        // The user wants B to stay at (1,0).
+        // So New Array needs to be: [A, null, B, null].
+        
+        // We need to reconstruct the queue based on visual coordinates.
       }
-      onReorder(newQueue);
+      
+      // We need a way to know the OLD cols/rows to do this mapping.
+      // Since we don't have them in this effect, we might need a ref to track previous dimensions.
     }
   }, [totalSlots, mergeQueue.length, onReorder]);
+
+  // Ref to track previous dimensions for smart resizing
+  const prevDims = useRef({ rows, cols });
+
+  // Local state for inputs to prevent jitter and allow "commit" action
+  const [localRows, setLocalRows] = useState(rows);
+  const [localCols, setLocalCols] = useState(cols);
+
+  // Sync local state when props change externally (e.g. undo/redo)
+  useEffect(() => {
+      setLocalRows(rows);
+      setLocalCols(cols);
+      prevDims.current = { rows, cols };
+  }, [rows, cols]);
+
+  const handleGridResize = (newRows: number, newCols: number) => {
+      const oldRows = prevDims.current.rows;
+      const oldCols = prevDims.current.cols;
+      
+      if (oldRows !== newRows || oldCols !== newCols) {
+          // Dimensions changed. Re-map the queue to preserve visual positions.
+          const newQueue = new Array(newRows * newCols).fill(null);
+          
+          // Map old items to new positions
+          for (let r = 0; r < oldRows; r++) {
+              for (let c = 0; c < oldCols; c++) {
+                  const oldIdx = r * oldCols + c;
+                  if (oldIdx < mergeQueue.length) {
+                      const item = mergeQueue[oldIdx];
+                      // If this position exists in new grid, place it there
+                      if (r < newRows && c < newCols) {
+                          const newIdx = r * newCols + c;
+                          newQueue[newIdx] = item;
+                      }
+                  }
+              }
+          }
+          
+          // Batch updates
+          if (onRecordHistory) onRecordHistory();
+          setRows(newRows);
+          setCols(newCols);
+          onReorder(newQueue);
+          
+          prevDims.current = { rows: newRows, cols: newCols };
+      }
+  };
+
+  const handleRowsCommit = () => {
+      const val = Math.max(1, localRows);
+      if (val !== rows) {
+          handleGridResize(val, cols);
+      } else {
+          setLocalRows(rows); // Reset invalid input
+      }
+  };
+
+  const handleColsCommit = () => {
+      const val = Math.max(1, localCols);
+      if (val !== cols) {
+          handleGridResize(rows, val);
+      } else {
+          setLocalCols(cols); // Reset invalid input
+      }
+  };
+  
+  useEffect(() => {
+      // This effect now ONLY handles initialization or external queue updates NOT caused by resize
+      // We check if the queue length matches the EXPECTED size based on props.
+      // If it doesn't match, and we didn't just trigger a resize (handled in handleGridResize),
+      // then we should pad/slice.
+      
+      const expectedSize = rows * cols;
+      if (mergeQueue.length !== expectedSize) {
+          // Check if this mismatch is due to a pending resize we just handled?
+          // Actually, if we use handleGridResize, we update everything at once.
+          // But React updates are async.
+          
+          // Simple check: If the queue is just the wrong size (e.g. from undo/redo or initial load), fix it.
+          // But we must NOT do the complex remapping here, just simple padding/slicing.
+          
+          const newQueue = [...mergeQueue];
+          if (newQueue.length < expectedSize) {
+              while (newQueue.length < expectedSize) newQueue.push(null);
+          } else if (newQueue.length > expectedSize) {
+              newQueue.length = expectedSize;
+          }
+          onReorder(newQueue);
+      }
+  }, [rows, cols, mergeQueue.length, onReorder]);
 
   const updateBox = (projectId: string, boxId: string, updates: Partial<Box>) => {
      const project = projects.find(p => p.id === projectId);
@@ -790,7 +916,13 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
         return;
     }
     setDraggingIndex(index);
-    e.dataTransfer.effectAllowed = 'move';
+    
+    // Allow copy effect if Alt is pressed
+    if (e.altKey) {
+        e.dataTransfer.effectAllowed = 'copy';
+    } else {
+        e.dataTransfer.effectAllowed = 'move';
+    }
 
     // Drag Preview Generation - REDUCED SIZE
     const projectId = mergeQueue[index];
@@ -844,6 +976,14 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
   const handleDragOver = (e: React.DragEvent, index: number) => {
     e.preventDefault();
     if (tool === 'hand' || tool === 'draw' || boxDrag) return;
+    
+    // Update drop effect based on key state during drag over
+    if (e.altKey) {
+        e.dataTransfer.dropEffect = 'copy';
+    } else {
+        e.dataTransfer.dropEffect = 'move';
+    }
+    
     if (dragOverIndex !== index) setDragOverIndex(index);
   };
 
@@ -852,18 +992,41 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
     setDragOverIndex(null);
     if (tool === 'hand' || tool === 'draw' || boxDrag) return;
 
-    if (draggingIndex === null || draggingIndex === targetIndex) {
-      setDraggingIndex(null);
-      return;
+    // Handle Project File Drop (from Sidebar)
+    const droppedProjectId = e.dataTransfer.getData('application/x-project-id');
+    if (droppedProjectId) {
+        if(onRecordHistory) onRecordHistory();
+        const nextQueue = [...mergeQueue];
+        nextQueue[targetIndex] = droppedProjectId;
+        onReorder(nextQueue);
+        return;
     }
-    
-    // Record history before reordering
-    if(onRecordHistory) onRecordHistory();
-    
+
+    if (draggingIndex === null) return;
+
+    // Handle internal drag (Move or Copy)
+    if (onRecordHistory) onRecordHistory();
     const nextQueue = [...mergeQueue];
-    const temp = nextQueue[draggingIndex];
-    nextQueue[draggingIndex] = nextQueue[targetIndex];
-    nextQueue[targetIndex] = temp;
+    const sourceProjectId = nextQueue[draggingIndex];
+
+    if (e.altKey && onDuplicateProject && sourceProjectId) {
+        // COPY MODE: Duplicate project and place in target
+        const newProjectId = onDuplicateProject(sourceProjectId);
+        if (newProjectId) {
+            nextQueue[targetIndex] = newProjectId;
+            // Note: We do NOT clear the source slot in copy mode
+        }
+    } else {
+        // MOVE MODE: Swap items
+        if (draggingIndex === targetIndex) {
+            setDraggingIndex(null);
+            return;
+        }
+        const temp = nextQueue[draggingIndex];
+        nextQueue[draggingIndex] = nextQueue[targetIndex];
+        nextQueue[targetIndex] = temp;
+    }
+
     onReorder(nextQueue);
     setDraggingIndex(null);
   };
@@ -1026,11 +1189,14 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
                   <div className="flex items-center gap-1 px-1">
                       <label className="text-[9px] font-bold text-slate-500 uppercase">Rows</label>
                       <input 
-                      type="number" min="1" max="10" 
-                      value={rows} 
-                      onChange={(e) => {
-                          if(onRecordHistory) onRecordHistory();
-                          setRows(Math.max(1, parseInt(e.target.value) || 1));
+                      type="number" min="1"
+                      value={localRows} 
+                      onChange={(e) => setLocalRows(parseInt(e.target.value) || 0)}
+                      onBlur={handleRowsCommit}
+                      onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                              (e.target as HTMLInputElement).blur();
+                          }
                       }}
                       className="w-8 bg-transparent text-sm font-bold text-slate-900 outline-none text-center"
                       />
@@ -1039,11 +1205,14 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
                   <div className="flex items-center gap-1 px-1">
                       <label className="text-[9px] font-bold text-slate-500 uppercase">Cols</label>
                       <input 
-                      type="number" min="1" max="10" 
-                      value={cols} 
-                      onChange={(e) => {
-                          if(onRecordHistory) onRecordHistory();
-                          setCols(Math.max(1, parseInt(e.target.value) || 1));
+                      type="number" min="1"
+                      value={localCols} 
+                      onChange={(e) => setLocalCols(parseInt(e.target.value) || 0)}
+                      onBlur={handleColsCommit}
+                      onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                              (e.target as HTMLInputElement).blur();
+                          }
                       }}
                       className="w-8 bg-transparent text-sm font-bold text-slate-900 outline-none text-center"
                       />

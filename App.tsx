@@ -159,6 +159,38 @@ const App: React.FC = () => {
   }, [projects, activeProjectId, mergeQueue, rows, cols, boxOpacity, showLabels, view]);
 
 
+  const duplicateProject = (projectId: string): string | null => {
+    const projectToCopy = projects.find(p => p.id === projectId);
+    if (!projectToCopy) return null;
+
+    recordHistory(); // Save state before paste
+    
+    const newId = `proj-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`;
+    const newBoxes = projectToCopy.boxes.map((box, idx) => ({
+      ...box,
+      id: `box-${newId}-${idx}-${Math.random().toString(36).substr(2, 5)}`
+    }));
+
+    let newPath = projectToCopy.input_path;
+    const parts = newPath.split('.');
+    if (parts.length > 1) {
+      const ext = parts.pop();
+      newPath = `${parts.join('.')} (Copy).${ext}`;
+    } else {
+      newPath = `${newPath} (Copy)`;
+    }
+
+    const newProject: Project = {
+      ...projectToCopy,
+      id: newId,
+      input_path: newPath,
+      boxes: newBoxes,
+    };
+
+    setProjects(prev => [...prev, newProject]);
+    return newId;
+  };
+
   // Global Keyboard Shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -505,6 +537,7 @@ const App: React.FC = () => {
               onRecordHistory={recordHistory}
               boxClipboard={boxClipboard}
               onCopyBox={setBoxClipboard}
+              onDuplicateProject={duplicateProject}
             />
           )}
         </div>
