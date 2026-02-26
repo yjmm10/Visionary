@@ -253,10 +253,7 @@ const Sidebar: React.FC<SidebarProps> = ({
                               onSelect(p.id);
                             }}
                             draggable
-                            onDragStart={(e) => {
-                                e.dataTransfer.setData('application/x-project-id', p.id);
-                                e.dataTransfer.effectAllowed = 'copy';
-                            }}
+                            onDragStart={(e) => handleDragStart(e, p.id)}
                             className={`group relative flex items-center gap-2 px-2 py-2 rounded-md cursor-pointer border transition-all duration-200 outline-none focus:ring-2 focus:ring-blue-200 ${activeId === p.id ? 'bg-blue-50 border-blue-100 shadow-sm' : 'bg-transparent border-transparent hover:bg-slate-50'}`}
                           >
                             <div className={`w-1.5 h-1.5 rounded-full shrink-0 ${activeId === p.id ? 'bg-blue-500' : 'bg-slate-300'}`} />

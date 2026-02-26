@@ -17,12 +17,20 @@ export interface Project {
   imageHeight: number;
 }
 
+export interface GridSpan {
+  row: number;
+  col: number;
+  rowSpan: number;
+  colSpan: number;
+}
+
 export interface AppState {
   projects: Project[];
   activeProjectId: string | null;
   mergeQueue: (string | null)[]; // IDs of projects in the merge view slots
   rows: number;
   cols: number;
+  layout: GridSpan[];
   boxOpacity: number;
   showLabels: boolean;
   view?: 'editor' | 'merge';

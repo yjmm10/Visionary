@@ -1,17 +1,20 @@
 
 import React, { useRef, useState, useEffect, useMemo, useCallback } from 'react';
-import { Project, Box } from '../types';
+import { Project, Box, GridSpan } from '../types';
 import { Icons, COLORS } from '../constants';
 import html2canvas from 'html2canvas';
-import { ZoomIn, ZoomOut, Maximize, Hand, MousePointer2, RefreshCw, Trash2, X, PlusSquare, Eye, EyeOff } from 'lucide-react';
+import { ZoomIn, ZoomOut, Maximize, Hand, MousePointer2, RefreshCw, Trash2, X, PlusSquare, Eye, EyeOff, LayoutGrid } from 'lucide-react';
+import GridSettingsDialog from './GridSettingsDialog';
 
 interface MergeWorkspaceProps {
   projects: Project[];
   mergeQueue: (string | null)[];
   rows: number;
   cols: number;
+  layout?: GridSpan[];
   setRows: (r: number) => void;
   setCols: (c: number) => void;
+  setLayout?: (l: GridSpan[]) => void;
   onReorder: (ids: (string | null)[]) => void;
   onDoubleClick: (id: string) => void;
   onProjectUpdate: (projectId: string, boxes: Box[]) => void;
@@ -30,8 +33,10 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
   mergeQueue, 
   rows, 
   cols,
+  layout = [],
   setRows,
   setCols,
+  setLayout,
   onReorder,
   onDoubleClick,
   onProjectUpdate,
@@ -47,6 +52,8 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
   const containerRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   
+  const [isGridSettingsOpen, setIsGridSettingsOpen] = useState(false);
+
   // Transform State
   const [zoom, setZoom] = useState(1);
   const [offset, setOffset] = useState({ x: 0, y: 0 });
@@ -57,6 +64,14 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
   // Snapping State
   const [snapLines, setSnapLines] = useState<{ type: 'vertical' | 'horizontal', position: number, start: number, end: number }[]>([]);
 
+  // Helper to check if a cell is covered by a span
+  const getSpanCovering = (r: number, c: number) => {
+    return layout.find(s => 
+      r >= s.row && r < s.row + s.rowSpan &&
+      c >= s.col && c < s.col + s.colSpan
+    );
+  };
+
   // Helper to get absolute coordinates of a box in the merged canvas
   const getAbsoluteBoxCoords = (projectId: string, box: Box) => {
       const index = mergeQueue.indexOf(projectId);
@@ -65,15 +80,24 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
       const row = Math.floor(index / cols);
       const col = index % cols;
       
+      // Adjust for spans if necessary? 
+      // Actually, if we are inside a merged cell, the "index" in mergeQueue corresponds to the top-left slot.
+      // But visually it spans.
+      // The coordinate transformation needs to know the visual dimensions of the cell.
+      
+      const span = getSpanCovering(row, col);
+      const cellW = span ? gridMetrics.baseW * span.colSpan : gridMetrics.baseW;
+      const cellH = span ? gridMetrics.baseH * span.rowSpan : gridMetrics.baseH;
+
       const projectData = projects.find(p => p.id === projectId);
       if (!projectData) return null;
 
       // Calculate scale and offset within the cell
-      const scale = Math.min(gridMetrics.baseW / projectData.imageWidth, gridMetrics.baseH / projectData.imageHeight);
+      const scale = Math.min(cellW / projectData.imageWidth, cellH / projectData.imageHeight);
       const drawnW = projectData.imageWidth * scale;
       const drawnH = projectData.imageHeight * scale;
-      const offX = (gridMetrics.baseW - drawnW) / 2;
-      const offY = (gridMetrics.baseH - drawnH) / 2;
+      const offX = (cellW - drawnW) / 2;
+      const offY = (cellH - drawnH) / 2;
 
       // Cell origin
       const cellX = col * gridMetrics.baseW;
@@ -99,14 +123,18 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
       const row = Math.floor(index / cols);
       const col = index % cols;
 
+      const span = getSpanCovering(row, col);
+      const cellW = span ? gridMetrics.baseW * span.colSpan : gridMetrics.baseW;
+      const cellH = span ? gridMetrics.baseH * span.rowSpan : gridMetrics.baseH;
+
       const projectData = projects.find(p => p.id === projectId);
       if (!projectData) return null;
 
-      const scale = Math.min(gridMetrics.baseW / projectData.imageWidth, gridMetrics.baseH / projectData.imageHeight);
+      const scale = Math.min(cellW / projectData.imageWidth, cellH / projectData.imageHeight);
       const drawnW = projectData.imageWidth * scale;
       const drawnH = projectData.imageHeight * scale;
-      const offX = (gridMetrics.baseW - drawnW) / 2;
-      const offY = (gridMetrics.baseH - drawnH) / 2;
+      const offX = (cellW - drawnW) / 2;
+      const offY = (cellH - drawnH) / 2;
 
       const cellX = col * gridMetrics.baseW;
       const cellY = row * gridMetrics.baseH;
@@ -1217,6 +1245,14 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
                       className="w-8 bg-transparent text-sm font-bold text-slate-900 outline-none text-center"
                       />
                   </div>
+                  <div className="h-4 w-px bg-slate-200" />
+                  <button
+                    onClick={() => setIsGridSettingsOpen(true)}
+                    className="p-1 hover:bg-slate-200 rounded text-slate-600"
+                    title="Advanced Layout Settings"
+                  >
+                    <LayoutGrid size={14} />
+                  </button>
               </div>
             </div>
 
@@ -1273,149 +1309,162 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
                   gap: '0px'
                 }}
               >
-                {Array.from({ length: totalSlots }).map((_, idx) => {
-                  const projectId = mergeQueue[idx];
-                  const project = projects.find(p => p.id === projectId);
-                  
-                  return (
-                    <div 
-                      key={`slot-${idx}`}
-                      data-idx={idx}
-                      onDragOver={(e) => handleDragOver(e, idx)}
-                      onDrop={(e) => handleDrop(e, idx)}
-                      onDragLeave={() => setDragOverIndex(null)}
-                      draggable={tool === 'select' && !!project} // Enabled even if box selected, handled by preventDefault in box mousedown
-                      onDragStart={(e) => handleDragStart(e, idx)}
-                      onDoubleClick={() => project && onDoubleClick(project.id)}
-                      onMouseDown={(e) => {
-                        // Deselect box if clicking on the slot background
-                        if (tool === 'select') {
-                           setSelectedBox(null);
-                        }
-                      }}
-                      style={{ width: gridMetrics.baseW, height: gridMetrics.baseH }}
-                      className={`relative bg-white overflow-hidden flex flex-col group box-border ${
-                        project 
-                          ? draggingIndex === idx 
-                            ? 'opacity-50' 
-                            : ''
-                          : ''
-                      } ${dragOverIndex === idx ? 'z-10 ring-4 ring-blue-500 ring-inset' : ''} ${tool === 'select' && project && !selectedBox ? 'cursor-grab active:cursor-grabbing' : ''}`}
-                    >
-                      {project ? (
-                        <div className="relative w-full h-full bg-white pointer-events-none">
-                          {project.imageUrl && (
-                            <img 
-                              src={project.imageUrl} 
-                              alt="" 
-                              className="w-full h-full object-contain block"
-                            />
-                          )}
-                          
-                          {project.imageWidth > 0 && (
-                            <svg 
-                              className="absolute inset-0 w-full h-full pointer-events-none"
-                              viewBox={`0 0 ${project.imageWidth} ${project.imageHeight}`}
-                              preserveAspectRatio="xMidYMid meet"
-                            >
-                              {project.boxes.map((box) => {
-                                const color = COLORS[box.cls_id % COLORS.length];
-                                const isSelected = selectedBox?.projectId === project.id && selectedBox?.boxId === box.id;
-                                const [x1, y1, x2, y2] = box.coordinate;
-                                
-                                return (
-                                  <g key={box.id} className="pointer-events-auto">
-                                    <rect 
-                                      x={Math.min(box.coordinate[0], box.coordinate[2])} 
-                                      y={Math.min(box.coordinate[1], box.coordinate[3])} 
-                                      width={Math.abs(box.coordinate[2] - box.coordinate[0])} 
-                                      height={Math.abs(box.coordinate[3] - box.coordinate[1])} 
-                                      fill={color}
-                                      fillOpacity={isSelected ? Math.min(1, boxOpacity + 0.2) : boxOpacity}
-                                      stroke={color}
-                                      strokeWidth={project.imageWidth / 200}
-                                      strokeOpacity={1}
-                                      style={{ cursor: tool === 'select' ? 'move' : 'default' }}
-                                      onMouseDown={(e) => handleBoxMouseDown(e, project.id, box.id, 'move')}
-                                    />
-                                    {isSelected && tool === 'select' && !copying && (() => {
-                                      const midX = (x1 + x2) / 2;
-                                      const midY = (y1 + y2) / 2;
-                                      const handles = [
-                                        // Corners
-                                        { x: x1, y: y1, i: 0, c: 'nwse-resize' },
-                                        { x: x2, y: y1, i: 1, c: 'nesw-resize' },
-                                        { x: x1, y: y2, i: 2, c: 'nesw-resize' },
-                                        { x: x2, y: y2, i: 3, c: 'nwse-resize' },
-                                        // Edges
-                                        { x: midX, y: y1, i: 4, c: 'ns-resize' }, // Top
-                                        { x: x2, y: midY, i: 5, c: 'ew-resize' }, // Right
-                                        { x: midX, y: y2, i: 6, c: 'ns-resize' }, // Bottom
-                                        { x: x1, y: midY, i: 7, c: 'ew-resize' }, // Left
-                                      ];
-                                      
-                                      return handles.map(h => (
-                                        <circle 
-                                          key={h.i}
-                                          cx={h.x} cy={h.y} 
-                                          r={project.imageWidth / 100} // Dynamic radius based on image size
-                                          fill="white" 
-                                          stroke={color} 
-                                          strokeWidth={project.imageWidth / 300}
-                                          className="cursor-pointer"
-                                          style={{ cursor: h.c }}
-                                          onMouseDown={(e) => handleBoxMouseDown(e, project.id, box.id, 'handle', h.i)}
-                                        />
-                                      ));
-                                    })()}
-                                    {showLabels && (
-                                      <text
-                                        x={Math.min(box.coordinate[0], box.coordinate[2])}
-                                        y={Math.min(box.coordinate[1], box.coordinate[3]) - (project.imageWidth * 0.005)}
-                                        fill={color}
-                                        fontSize={Math.max(14, project.imageWidth * 0.015)}
-                                        fontWeight="bold"
-                                        className="pointer-events-none select-none"
-                                        style={{ textShadow: '0px 0px 2px white' }}
-                                      >
-                                        {box.label}
-                                      </text>
-                                    )}
-                                  </g>
-                                );
-                              })}
-                              
-                              {/* Drawing Preview */}
-                              {isDrawing && drawStart?.projectId === project.id && currentDrawRect && (
-                                <rect
-                                    x={Math.min(currentDrawRect.x1, currentDrawRect.x2)}
-                                    y={Math.min(currentDrawRect.y1, currentDrawRect.y2)}
-                                    width={Math.abs(currentDrawRect.x2 - currentDrawRect.x1)}
-                                    height={Math.abs(currentDrawRect.y2 - currentDrawRect.y1)}
-                                    fill="rgba(37, 99, 235, 0.2)"
-                                    stroke="#2563eb"
-                                    strokeWidth={project.imageWidth / 200}
-                                    strokeDasharray={`${project.imageWidth/100} ${project.imageWidth/200}`}
+                {Array.from({ length: rows }).flatMap((_, r) => 
+                    Array.from({ length: cols }).map((_, c) => {
+                      const idx = r * cols + c;
+                      const span = getSpanCovering(r, c);
+                      const isStart = span && span.row === r && span.col === c;
+                      
+                      // If covered but not start, don't render anything
+                      if (span && !isStart) return null;
+                      
+                      const projectId = mergeQueue[idx];
+                      const project = projects.find(p => p.id === projectId);
+                      
+                      return (
+                        <div 
+                          key={`slot-${idx}`}
+                          data-idx={idx}
+                          onDragOver={(e) => handleDragOver(e, idx)}
+                          onDrop={(e) => handleDrop(e, idx)}
+                          onDragLeave={() => setDragOverIndex(null)}
+                          draggable={tool === 'select' && !!project}
+                          onDragStart={(e) => handleDragStart(e, idx)}
+                          onDoubleClick={() => project && onDoubleClick(project.id)}
+                          onMouseDown={(e) => {
+                            if (tool === 'select') {
+                               setSelectedBox(null);
+                            }
+                          }}
+                          style={{ 
+                             width: span ? gridMetrics.baseW * span.colSpan : gridMetrics.baseW, 
+                             height: span ? gridMetrics.baseH * span.rowSpan : gridMetrics.baseH,
+                             gridColumn: span ? `span ${span.colSpan}` : 'span 1',
+                             gridRow: span ? `span ${span.rowSpan}` : 'span 1',
+                          }}
+                          className={`relative bg-white overflow-hidden flex flex-col group box-border ${
+                            project 
+                              ? draggingIndex === idx 
+                                ? 'opacity-50' 
+                                : ''
+                              : ''
+                          } ${dragOverIndex === idx ? 'z-10 ring-4 ring-blue-500 ring-inset' : ''} ${tool === 'select' && project && !selectedBox ? 'cursor-grab active:cursor-grabbing' : ''}`}
+                        >
+                          {project ? (
+                            <div className="relative w-full h-full bg-white pointer-events-none">
+                              {project.imageUrl && (
+                                <img 
+                                  src={project.imageUrl} 
+                                  alt="" 
+                                  className="w-full h-full object-contain block"
                                 />
                               )}
-                            </svg>
-                          )}
-                          
-                          {/* Info Overlay (Hidden if box is selected to reduce clutter) */}
-                          {!selectedBox && !isDrawing && (
-                              <div className="absolute bottom-4 left-4 max-w-[80%] bg-black/70 backdrop-blur-md px-3 py-1.5 rounded text-white text-[10px] font-bold opacity-0 group-hover:opacity-100 transition-opacity">
-                              {project.input_path.split('/').pop()}
-                              </div>
+                              
+                              {project.imageWidth > 0 && (
+                                <svg 
+                                  className="absolute inset-0 w-full h-full pointer-events-none"
+                                  viewBox={`0 0 ${project.imageWidth} ${project.imageHeight}`}
+                                  preserveAspectRatio="xMidYMid meet"
+                                >
+                                  {project.boxes.map((box) => {
+                                    const color = COLORS[box.cls_id % COLORS.length];
+                                    const isSelected = selectedBox?.projectId === project.id && selectedBox?.boxId === box.id;
+                                    const [x1, y1, x2, y2] = box.coordinate;
+                                    
+                                    return (
+                                      <g key={box.id} className="pointer-events-auto">
+                                        <rect 
+                                          x={Math.min(box.coordinate[0], box.coordinate[2])} 
+                                          y={Math.min(box.coordinate[1], box.coordinate[3])} 
+                                          width={Math.abs(box.coordinate[2] - box.coordinate[0])} 
+                                          height={Math.abs(box.coordinate[3] - box.coordinate[1])} 
+                                          fill={color}
+                                          fillOpacity={isSelected ? Math.min(1, boxOpacity + 0.2) : boxOpacity}
+                                          stroke={color}
+                                          strokeWidth={project.imageWidth / 200}
+                                          strokeOpacity={1}
+                                          style={{ cursor: tool === 'select' ? 'move' : 'default' }}
+                                          onMouseDown={(e) => handleBoxMouseDown(e, project.id, box.id, 'move')}
+                                        />
+                                        {isSelected && tool === 'select' && !copying && (() => {
+                                          const midX = (x1 + x2) / 2;
+                                          const midY = (y1 + y2) / 2;
+                                          const handles = [
+                                            // Corners
+                                            { x: x1, y: y1, i: 0, c: 'nwse-resize' },
+                                            { x: x2, y: y1, i: 1, c: 'nesw-resize' },
+                                            { x: x1, y: y2, i: 2, c: 'nesw-resize' },
+                                            { x: x2, y: y2, i: 3, c: 'nwse-resize' },
+                                            // Edges
+                                            { x: midX, y: y1, i: 4, c: 'ns-resize' }, // Top
+                                            { x: x2, y: midY, i: 5, c: 'ew-resize' }, // Right
+                                            { x: midX, y: y2, i: 6, c: 'ns-resize' }, // Bottom
+                                            { x: x1, y: midY, i: 7, c: 'ew-resize' }, // Left
+                                          ];
+                                          
+                                          return handles.map(h => (
+                                            <circle 
+                                              key={h.i}
+                                              cx={h.x} cy={h.y} 
+                                              r={project.imageWidth / 100} // Dynamic radius based on image size
+                                              fill="white" 
+                                              stroke={color} 
+                                              strokeWidth={project.imageWidth / 300}
+                                              className="cursor-pointer"
+                                              style={{ cursor: h.c }}
+                                              onMouseDown={(e) => handleBoxMouseDown(e, project.id, box.id, 'handle', h.i)}
+                                            />
+                                          ));
+                                        })()}
+                                        {showLabels && (
+                                          <text
+                                            x={Math.min(box.coordinate[0], box.coordinate[2])}
+                                            y={Math.min(box.coordinate[1], box.coordinate[3]) - (project.imageWidth * 0.005)}
+                                            fill={color}
+                                            fontSize={Math.max(14, project.imageWidth * 0.015)}
+                                            fontWeight="bold"
+                                            className="pointer-events-none select-none"
+                                            style={{ textShadow: '0px 0px 2px white' }}
+                                          >
+                                            {box.label}
+                                          </text>
+                                        )}
+                                      </g>
+                                    );
+                                  })}
+                                  
+                                  {/* Drawing Preview */}
+                                  {isDrawing && drawStart?.projectId === project.id && currentDrawRect && (
+                                    <rect
+                                        x={Math.min(currentDrawRect.x1, currentDrawRect.x2)}
+                                        y={Math.min(currentDrawRect.y1, currentDrawRect.y2)}
+                                        width={Math.abs(currentDrawRect.x2 - currentDrawRect.x1)}
+                                        height={Math.abs(currentDrawRect.y2 - currentDrawRect.y1)}
+                                        fill="rgba(37, 99, 235, 0.2)"
+                                        stroke="#2563eb"
+                                        strokeWidth={project.imageWidth / 200}
+                                        strokeDasharray={`${project.imageWidth/100} ${project.imageWidth/200}`}
+                                    />
+                                  )}
+                                </svg>
+                              )}
+                              
+                              {/* Info Overlay (Hidden if box is selected to reduce clutter) */}
+                              {!selectedBox && !isDrawing && (
+                                  <div className="absolute bottom-4 left-4 max-w-[80%] bg-black/70 backdrop-blur-md px-3 py-1.5 rounded text-white text-[10px] font-bold opacity-0 group-hover:opacity-100 transition-opacity">
+                                  {project.input_path.split('/').pop()}
+                                  </div>
+                              )}
+                            </div>
+                          ) : (
+                            <div className="w-full h-full flex items-center justify-center border border-slate-100 bg-slate-50/50">
+                              <Icons.Plus size={48} className="text-slate-200" />
+                            </div>
                           )}
                         </div>
-                      ) : (
-                        <div className="w-full h-full flex items-center justify-center border border-slate-100 bg-slate-50/50">
-                          <Icons.Plus size={48} className="text-slate-200" />
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
+                      );
+                    })
+                )}
 
                 {/* Global Snap Lines Overlay */}
                 <svg className="absolute inset-0 w-full h-full pointer-events-none overflow-visible z-50">
@@ -1602,6 +1651,19 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
            </span>
         </div>
       </div>
+      <GridSettingsDialog 
+        isOpen={isGridSettingsOpen}
+        onClose={() => setIsGridSettingsOpen(false)}
+        initialRows={rows}
+        initialCols={cols}
+        initialLayout={layout}
+        onSave={(newRows, newCols, newLayout) => {
+            if (onRecordHistory) onRecordHistory();
+            setRows(newRows);
+            setCols(newCols);
+            if (setLayout) setLayout(newLayout);
+        }}
+      />
     </div>
   );
 };
