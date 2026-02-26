@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect, useCallback } from 'react';
-import { Project, Box, AppState, Snapshot } from './types';
+import { Project, Box, AppState, Snapshot, CellConfig } from './types';
 import { Icons } from './constants';
 import Sidebar from './components/Sidebar';
 import AnnotationEditor from './components/AnnotationEditor';
@@ -19,6 +19,9 @@ const App: React.FC = () => {
   const [cols, setCols] = useState(3);
   const [layout, setLayout] = useState<any[]>([]);
   
+  // Cell Configs State
+  const [cellConfigs, setCellConfigs] = useState<Record<number, CellConfig>>({});
+
   const [view, setView] = useState<'editor' | 'merge'>('editor');
   
   // Shared Visual State
@@ -51,6 +54,7 @@ const App: React.FC = () => {
         setRows(parsed.rows || 3);
         setCols(parsed.cols || 3);
         setLayout(parsed.layout || []);
+        setCellConfigs(parsed.cellConfigs || {});
         if (parsed.boxOpacity !== undefined) setBoxOpacity(parsed.boxOpacity);
         if (parsed.showLabels !== undefined) setShowLabels(parsed.showLabels);
         if (parsed.view) setView(parsed.view);
@@ -72,12 +76,12 @@ const App: React.FC = () => {
 
   useEffect(() => {
     try {
-      const state = { projects, mergeQueue, rows, cols, layout, boxOpacity, showLabels, view };
+      const state = { projects, mergeQueue, rows, cols, layout, cellConfigs, boxOpacity, showLabels, view };
       localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
     } catch (e) {
       console.warn("Failed to save main state to localStorage (likely quota exceeded).", e);
     }
-  }, [projects, mergeQueue, rows, cols, layout, boxOpacity, showLabels, view]);
+  }, [projects, mergeQueue, rows, cols, layout, cellConfigs, boxOpacity, showLabels, view]);
 
   useEffect(() => {
     try {
@@ -97,6 +101,7 @@ const App: React.FC = () => {
         rows,
         cols,
         layout: [...layout],
+        cellConfigs: { ...cellConfigs },
         boxOpacity,
         showLabels,
         view
@@ -111,7 +116,7 @@ const App: React.FC = () => {
         future: [] // Clear future on new action
       };
     });
-  }, [projects, activeProjectId, mergeQueue, rows, cols, layout, boxOpacity, showLabels, view]);
+  }, [projects, activeProjectId, mergeQueue, rows, cols, layout, cellConfigs, boxOpacity, showLabels, view]);
 
   const handleUndo = useCallback(() => {
     setHistory(prev => {
@@ -120,7 +125,7 @@ const App: React.FC = () => {
       const previous = prev.past[prev.past.length - 1];
       const newPast = prev.past.slice(0, -1);
       
-      const current: AppState = { projects, activeProjectId, mergeQueue, rows, cols, layout, boxOpacity, showLabels, view };
+      const current: AppState = { projects, activeProjectId, mergeQueue, rows, cols, layout, cellConfigs, boxOpacity, showLabels, view };
 
       // Restore State
       setProjects(previous.projects);
@@ -129,6 +134,7 @@ const App: React.FC = () => {
       setRows(previous.rows);
       setCols(previous.cols);
       setLayout(previous.layout || []);
+      setCellConfigs(previous.cellConfigs || {});
       // We don't necessarily undo visual preferences like opacity/view, but we can if we want full state restore.
       // For editing flow, keeping current view is usually better, but let's follow the snapshot logic for consistency.
       
@@ -137,7 +143,7 @@ const App: React.FC = () => {
         future: [current, ...prev.future]
       };
     });
-  }, [projects, activeProjectId, mergeQueue, rows, cols, layout, boxOpacity, showLabels, view]);
+  }, [projects, activeProjectId, mergeQueue, rows, cols, layout, cellConfigs, boxOpacity, showLabels, view]);
 
   const handleRedo = useCallback(() => {
     setHistory(prev => {
@@ -146,7 +152,7 @@ const App: React.FC = () => {
       const next = prev.future[0];
       const newFuture = prev.future.slice(1);
       
-      const current: AppState = { projects, activeProjectId, mergeQueue, rows, cols, layout, boxOpacity, showLabels, view };
+      const current: AppState = { projects, activeProjectId, mergeQueue, rows, cols, layout, cellConfigs, boxOpacity, showLabels, view };
 
       // Restore State
       setProjects(next.projects);
@@ -155,13 +161,14 @@ const App: React.FC = () => {
       setRows(next.rows);
       setCols(next.cols);
       setLayout(next.layout || []);
+      setCellConfigs(next.cellConfigs || {});
 
       return {
         past: [...prev.past, current],
         future: newFuture
       };
     });
-  }, [projects, activeProjectId, mergeQueue, rows, cols, layout, boxOpacity, showLabels, view]);
+  }, [projects, activeProjectId, mergeQueue, rows, cols, layout, cellConfigs, boxOpacity, showLabels, view]);
 
 
   const duplicateProject = (projectId: string): string | null => {
@@ -362,7 +369,7 @@ const App: React.FC = () => {
     const snapshot = {
       version: 3,
       timestamp: Date.now(),
-      state: { projects, activeProjectId, mergeQueue, rows, cols, boxOpacity, showLabels, view }
+      state: { projects, activeProjectId, mergeQueue, rows, cols, layout, cellConfigs, boxOpacity, showLabels, view }
     };
     const blob = new Blob([JSON.stringify(snapshot, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
@@ -396,7 +403,7 @@ const App: React.FC = () => {
   const createQuickSnapshot = (name: string) => {
     if (name) {
       try {
-        const currentState = { projects, activeProjectId, mergeQueue, rows, cols, boxOpacity, showLabels, view };
+        const currentState = { projects, activeProjectId, mergeQueue, rows, cols, layout, cellConfigs, boxOpacity, showLabels, view };
         const deepCopiedState = JSON.parse(JSON.stringify(currentState));
 
         const newSnapshot: Snapshot = {
@@ -443,6 +450,7 @@ const App: React.FC = () => {
     if (data.rows) setRows(data.rows);
     if (data.cols) setCols(data.cols);
     if (data.layout) setLayout(data.layout);
+    if (data.cellConfigs) setCellConfigs(data.cellConfigs);
     if (data.boxOpacity !== undefined) setBoxOpacity(data.boxOpacity);
     if (data.showLabels !== undefined) setShowLabels(data.showLabels);
     if (data.view) setView(data.view);
@@ -547,6 +555,8 @@ const App: React.FC = () => {
               onCopyBox={setBoxClipboard}
               onDuplicateProject={duplicateProject}
               onSelectProject={setActiveProjectId}
+              cellConfigs={cellConfigs}
+              setCellConfigs={setCellConfigs}
             />
           )}
         </div>

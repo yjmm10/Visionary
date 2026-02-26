@@ -1,9 +1,9 @@
 
 import React, { useRef, useState, useEffect, useMemo, useCallback } from 'react';
-import { Project, Box, GridSpan } from '../types';
+import { Project, Box, GridSpan, CellConfig } from '../types';
 import { Icons, COLORS } from '../constants';
 import html2canvas from 'html2canvas';
-import { ZoomIn, ZoomOut, Maximize, Hand, MousePointer2, RefreshCw, Trash2, X, PlusSquare, Eye, EyeOff, LayoutGrid } from 'lucide-react';
+import { ZoomIn, ZoomOut, Maximize, Hand, MousePointer2, RefreshCw, Trash2, X, PlusSquare, Eye, EyeOff, LayoutGrid, Settings } from 'lucide-react';
 import GridSettingsDialog from './GridSettingsDialog';
 
 interface MergeWorkspaceProps {
@@ -27,6 +27,8 @@ interface MergeWorkspaceProps {
   onCopyBox?: (box: Box) => void;
   onDuplicateProject?: (projectId: string) => string | null;
   onSelectProject?: (projectId: string) => void;
+  cellConfigs?: Record<number, CellConfig>;
+  setCellConfigs?: (configs: Record<number, CellConfig>) => void;
 }
 
 const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({ 
@@ -49,12 +51,15 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
   boxClipboard,
   onCopyBox,
   onDuplicateProject,
-  onSelectProject
+  onSelectProject,
+  cellConfigs = {},
+  setCellConfigs
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   
   const [isGridSettingsOpen, setIsGridSettingsOpen] = useState(false);
+  const [selectedCellIndex, setSelectedCellIndex] = useState<number | null>(null);
 
   // Transform State
   const [zoom, setZoom] = useState(1);
@@ -1112,56 +1117,110 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
   const handleExport = async (mode: 'copy' | 'download') => {
     if (!contentRef.current || copying) return;
     setCopying(true);
-    const prevSelection = selectedBox;
-    setSelectedBox(null);
-    await new Promise(r => setTimeout(r, 50));
+    
+    // We don't need to clear selection state in the live app because we will clone the node
+    // and clean up the clone instead. This prevents flickering.
 
     try {
       const originalNode = contentRef.current;
       const clone = originalNode.cloneNode(true) as HTMLElement;
       
+      // Create a container for the clone that isolates it from the app's layout/transforms
       const container = document.createElement('div');
-      container.style.position = 'absolute';
-      container.style.top = '-9999px';
-      container.style.left = '-9999px';
+      container.style.position = 'fixed'; // Use fixed to ensure it's rendered in viewport (but hidden)
+      container.style.top = '0';
+      container.style.left = '0';
+      container.style.zIndex = '-9999';
+      container.style.opacity = '0';
+      container.style.pointerEvents = 'none';
       container.style.width = `${gridMetrics.totalW}px`;
       container.style.height = `${gridMetrics.totalH}px`;
+      container.style.overflow = 'hidden';
+      container.style.backgroundColor = '#ffffff'; // Ensure white background
+      
+      // Reset any transforms on the clone itself (though contentRef usually doesn't have them)
+      clone.style.transform = 'none';
+      clone.style.margin = '0';
+      clone.style.width = '100%';
+      clone.style.height = '100%';
+      
+      // CLEANUP: Remove UI artifacts from the clone
+      // 1. Remove selection rings and drag effects
+      const cells = clone.querySelectorAll('div[data-idx]');
+      cells.forEach(cell => {
+          cell.classList.remove('ring-4', 'ring-blue-500', 'ring-inset', 'ring-2', 'z-10', 'z-20', 'opacity-50', 'cursor-grab', 'cursor-grabbing');
+          // Ensure background is white
+          (cell as HTMLElement).style.backgroundColor = '#ffffff';
+      });
+
+      // 2. Remove resize handles (circles)
+      const handles = clone.querySelectorAll('circle');
+      handles.forEach(h => h.remove());
+
+      // 3. Remove Snap Lines SVG (usually z-50)
+      const svgs = clone.querySelectorAll('svg');
+      svgs.forEach(svg => {
+          if (svg.style.zIndex === '50' || svg.classList.contains('z-50')) {
+              svg.remove();
+          }
+      });
+
       container.appendChild(clone);
       document.body.appendChild(container);
 
+      // Wait for images to load in the clone
       const imgs = Array.from(clone.querySelectorAll('img'));
       await Promise.all(imgs.map(img => {
         if (img.complete) return Promise.resolve();
         return new Promise((resolve) => {
           img.onload = resolve;
           img.onerror = resolve;
+          // Timeout fallback
+          setTimeout(resolve, 1000);
         });
       }));
 
+      // Small delay to ensure layout is stable
       await new Promise(r => setTimeout(r, 100));
 
       const canvas = await html2canvas(clone, {
         useCORS: true,
-        scale: 1, 
+        scale: 2, // Higher quality
+        backgroundColor: '#ffffff',
+        logging: false,
         width: gridMetrics.totalW,
         height: gridMetrics.totalH,
-        backgroundColor: '#ffffff',
-        logging: false
+        windowWidth: gridMetrics.totalW,
+        windowHeight: gridMetrics.totalH,
+        x: 0,
+        y: 0,
+        scrollX: 0,
+        scrollY: 0,
+        // We've already manually cleaned the DOM, so we don't need aggressive ignoreElements
+        ignoreElements: (element) => {
+            return false; 
+        }
       });
 
       if (mode === 'copy') {
         canvas.toBlob(async (blob) => {
           if (blob) {
             try {
-              const item = new ClipboardItem({ 'image/png': blob });
-              await navigator.clipboard.write([item]);
-              alert("Image copied to clipboard!");
+              if (typeof ClipboardItem !== 'undefined') {
+                const item = new ClipboardItem({ 'image/png': blob });
+                await navigator.clipboard.write([item]);
+                alert("Image copied to clipboard!");
+              } else {
+                throw new Error("ClipboardItem not supported");
+              }
             } catch (e) {
+              console.warn("Clipboard write failed, falling back to download", e);
               const link = document.createElement('a');
               link.href = canvas.toDataURL('image/png');
               link.download = 'merged-output.png';
+              document.body.appendChild(link);
               link.click();
-              alert("Clipboard access restricted. Downloaded instead.");
+              document.body.removeChild(link);
             }
           }
         }, 'image/png');
@@ -1169,15 +1228,19 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
         const link = document.createElement('a');
         link.download = `merged-${Date.now()}.png`;
         link.href = canvas.toDataURL('image/png');
+        document.body.appendChild(link);
         link.click();
+        document.body.removeChild(link);
       }
+      
+      // Clean up
       document.body.removeChild(container);
+      
     } catch (err) {
       console.error("Export failed", err);
       alert("Failed to generate image.");
     } finally {
       setCopying(false);
-      setSelectedBox(prevSelection);
     }
   };
 
@@ -1384,6 +1447,7 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
                           onMouseDown={(e) => {
                             if (tool === 'select') {
                                setSelectedBox(null);
+                               setSelectedCellIndex(idx);
                                if (project && onSelectProject) onSelectProject(project.id);
                             }
                           }}
@@ -1399,8 +1463,36 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
                                 ? 'opacity-50' 
                                 : ''
                               : ''
-                          } ${dragOverIndex === idx ? 'z-10 ring-4 ring-blue-500 ring-inset' : ''} ${tool === 'select' && project && !selectedBox ? 'cursor-grab active:cursor-grabbing' : ''}`}
+                          } ${dragOverIndex === idx ? 'z-10 ring-4 ring-blue-500 ring-inset' : ''} ${tool === 'select' && project && !selectedBox ? 'cursor-grab active:cursor-grabbing' : ''} ${selectedCellIndex === idx ? 'ring-2 ring-blue-500 z-20' : ''}`}
                         >
+                          {/* Cell Header Text */}
+                          {cellConfigs[idx]?.text && (
+                            <div 
+                                className="absolute z-20 pointer-events-none whitespace-nowrap"
+                                style={{
+                                top: cellConfigs[idx]?.verticalAlign === 'bottom' ? 'auto' : (cellConfigs[idx]?.offsetY ?? 10),
+                                bottom: cellConfigs[idx]?.verticalAlign === 'bottom' ? (cellConfigs[idx]?.offsetY ?? 10) : 'auto',
+                                left: cellConfigs[idx]?.horizontalAlign === 'center' 
+                                    ? '50%' 
+                                    : cellConfigs[idx]?.horizontalAlign === 'right' 
+                                        ? 'auto' 
+                                        : (cellConfigs[idx]?.offsetX ?? 10),
+                                right: cellConfigs[idx]?.horizontalAlign === 'right' 
+                                    ? (cellConfigs[idx]?.offsetX ?? 10) 
+                                    : 'auto',
+                                transform: cellConfigs[idx]?.horizontalAlign === 'center' 
+                                    ? `translateX(calc(-50% + ${cellConfigs[idx]?.offsetX ?? 0}px))` 
+                                    : 'none',
+                                fontSize: cellConfigs[idx]?.fontSize ?? 16,
+                                color: cellConfigs[idx]?.color ?? '#000000',
+                                fontFamily: 'sans-serif',
+                                fontWeight: 500,
+                                }}
+                            >
+                                {cellConfigs[idx].text}
+                            </div>
+                          )}
+
                           {project ? (
                             <div className="relative w-full h-full bg-white pointer-events-none">
                               {project.imageUrl && (
@@ -1546,6 +1638,180 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
         {/* Right Sidebar */}
         <div className="w-80 shrink-0 flex flex-col gap-6 min-h-0">
           
+          {/* Panel 0: Cell Settings (Only visible when a cell is selected) */}
+          {selectedCellIndex !== null && (
+            <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm flex flex-col shrink-0 animate-in fade-in slide-in-from-right-4 duration-300">
+              <div className="p-3 border-b border-slate-100 bg-slate-50 flex items-center justify-between">
+                <h3 className="text-xs font-bold uppercase tracking-widest text-slate-500 flex items-center gap-2">
+                  <Settings size={12} />
+                  Cell Settings
+                </h3>
+                <button onClick={() => setSelectedCellIndex(null)} className="text-slate-400 hover:text-slate-600 transition-colors">
+                  <X size={14} />
+                </button>
+              </div>
+              
+              <div className="p-4 space-y-4">
+                {/* Header Text Config */}
+                <div className="space-y-3">
+                  <h4 className="text-xs font-bold text-slate-800 flex items-center gap-2">
+                    Header Text
+                  </h4>
+                  
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-bold text-slate-500 uppercase">Content</label>
+                    <input 
+                      type="text" 
+                      value={cellConfigs[selectedCellIndex]?.text || ''}
+                      onChange={(e) => {
+                        if (setCellConfigs) {
+                          const currentConfig = cellConfigs[selectedCellIndex] || { offsetX: 10, offsetY: 10, fontSize: 16, color: '#000000' };
+                          setCellConfigs({
+                            ...cellConfigs,
+                            [selectedCellIndex]: { ...currentConfig, text: e.target.value }
+                          });
+                        }
+                      }}
+                      placeholder="Enter header text..."
+                      className="w-full text-xs px-2 py-1.5 bg-white border border-slate-200 rounded focus:outline-none focus:ring-2 focus:ring-blue-500 transition-shadow"
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="space-y-1">
+                      <label className="text-[10px] font-bold text-slate-500 uppercase">Offset X</label>
+                      <input 
+                        type="number" 
+                        value={cellConfigs[selectedCellIndex]?.offsetX ?? 10}
+                        onChange={(e) => {
+                          if (setCellConfigs) {
+                            const currentConfig = cellConfigs[selectedCellIndex] || { text: '', offsetY: 10, fontSize: 16, color: '#000000' };
+                            setCellConfigs({
+                              ...cellConfigs,
+                              [selectedCellIndex]: { ...currentConfig, offsetX: parseInt(e.target.value) || 0 }
+                            });
+                          }
+                        }}
+                        className="w-full text-xs px-2 py-1 bg-white border border-slate-200 rounded focus:outline-none focus:ring-1 focus:ring-blue-500"
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-[10px] font-bold text-slate-500 uppercase">Offset Y</label>
+                      <input 
+                        type="number" 
+                        value={cellConfigs[selectedCellIndex]?.offsetY ?? 10}
+                        onChange={(e) => {
+                          if (setCellConfigs) {
+                            const currentConfig = cellConfigs[selectedCellIndex] || { text: '', offsetX: 10, fontSize: 16, color: '#000000' };
+                            setCellConfigs({
+                              ...cellConfigs,
+                              [selectedCellIndex]: { ...currentConfig, offsetY: parseInt(e.target.value) || 0 }
+                            });
+                          }
+                        }}
+                        className="w-full text-xs px-2 py-1 bg-white border border-slate-200 rounded focus:outline-none focus:ring-1 focus:ring-blue-500"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-bold text-slate-500 uppercase">Horizontal Alignment</label>
+                    <div className="flex bg-slate-100 p-0.5 rounded-md">
+                        {['left', 'center', 'right'].map((align) => (
+                            <button
+                                key={align}
+                                onClick={() => {
+                                    if (setCellConfigs) {
+                                        const currentConfig = cellConfigs[selectedCellIndex] || { text: '', offsetX: 10, offsetY: 10, fontSize: 16, color: '#000000' };
+                                        setCellConfigs({
+                                            ...cellConfigs,
+                                            [selectedCellIndex]: { ...currentConfig, horizontalAlign: align as any }
+                                        });
+                                    }
+                                }}
+                                className={`flex-1 text-[10px] uppercase font-bold py-1 rounded-sm transition-colors ${
+                                    (cellConfigs[selectedCellIndex]?.horizontalAlign || 'left') === align 
+                                    ? 'bg-white text-slate-900 shadow-sm' 
+                                    : 'text-slate-400 hover:text-slate-600'
+                                }`}
+                            >
+                                {align}
+                            </button>
+                        ))}
+                    </div>
+                  </div>
+
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-bold text-slate-500 uppercase">Vertical Alignment</label>
+                    <div className="flex bg-slate-100 p-0.5 rounded-md">
+                        {['top', 'bottom'].map((align) => (
+                            <button
+                                key={align}
+                                onClick={() => {
+                                    if (setCellConfigs) {
+                                        const currentConfig = cellConfigs[selectedCellIndex] || { text: '', offsetX: 10, offsetY: 10, fontSize: 16, color: '#000000' };
+                                        setCellConfigs({
+                                            ...cellConfigs,
+                                            [selectedCellIndex]: { ...currentConfig, verticalAlign: align as any }
+                                        });
+                                    }
+                                }}
+                                className={`flex-1 text-[10px] uppercase font-bold py-1 rounded-sm transition-colors ${
+                                    (cellConfigs[selectedCellIndex]?.verticalAlign || 'top') === align 
+                                    ? 'bg-white text-slate-900 shadow-sm' 
+                                    : 'text-slate-400 hover:text-slate-600'
+                                }`}
+                            >
+                                {align}
+                            </button>
+                        ))}
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="space-y-1">
+                      <label className="text-[10px] font-bold text-slate-500 uppercase">Font Size</label>
+                      <input 
+                        type="number" 
+                        value={cellConfigs[selectedCellIndex]?.fontSize ?? 16}
+                        onChange={(e) => {
+                          if (setCellConfigs) {
+                            const currentConfig = cellConfigs[selectedCellIndex] || { text: '', offsetX: 10, offsetY: 10, color: '#000000' };
+                            setCellConfigs({
+                              ...cellConfigs,
+                              [selectedCellIndex]: { ...currentConfig, fontSize: parseInt(e.target.value) || 12 }
+                            });
+                          }
+                        }}
+                        className="w-full text-xs px-2 py-1 bg-white border border-slate-200 rounded focus:outline-none focus:ring-1 focus:ring-blue-500"
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-[10px] font-bold text-slate-500 uppercase">Color</label>
+                      <div className="flex items-center gap-2">
+                          <input 
+                          type="color" 
+                          value={cellConfigs[selectedCellIndex]?.color || '#000000'}
+                          onChange={(e) => {
+                              if (setCellConfigs) {
+                              const currentConfig = cellConfigs[selectedCellIndex] || { text: '', offsetX: 10, offsetY: 10, fontSize: 16 };
+                              setCellConfigs({
+                                  ...cellConfigs,
+                                  [selectedCellIndex]: { ...currentConfig, color: e.target.value }
+                              });
+                              }
+                          }}
+                          className="w-8 h-8 border border-slate-200 rounded cursor-pointer p-0.5 bg-white shadow-sm"
+                          />
+                          <span className="text-[10px] text-slate-400 font-mono bg-slate-50 px-1.5 py-0.5 rounded border border-slate-100">{cellConfigs[selectedCellIndex]?.color || '#000000'}</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* Panel 1: Configuration */}
           <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm flex flex-col flex-1 min-h-0">
             <div className="p-4 border-b border-slate-200 flex items-center justify-between bg-white">

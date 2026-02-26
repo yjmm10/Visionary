@@ -24,6 +24,16 @@ export interface GridSpan {
   colSpan: number;
 }
 
+export interface CellConfig {
+  text: string;
+  offsetX: number;
+  offsetY: number;
+  fontSize: number;
+  color: string;
+  horizontalAlign?: 'left' | 'center' | 'right';
+  verticalAlign?: 'top' | 'bottom';
+}
+
 export interface AppState {
   projects: Project[];
   activeProjectId: string | null;
@@ -34,6 +44,7 @@ export interface AppState {
   boxOpacity: number;
   showLabels: boolean;
   view?: 'editor' | 'merge';
+  cellConfigs: Record<number, CellConfig>;
 }
 
 export interface Snapshot {
