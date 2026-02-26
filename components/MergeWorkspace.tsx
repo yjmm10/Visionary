@@ -52,6 +52,172 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
   const [isPanning, setIsPanning] = useState(false);
   const [panStart, setPanStart] = useState<{ x: number, y: number } | null>(null);
 
+  // Snapping State
+  const [snapLines, setSnapLines] = useState<{ type: 'vertical' | 'horizontal', position: number, start: number, end: number }[]>([]);
+
+  // Helper to get absolute coordinates of a box in the merged canvas
+  const getAbsoluteBoxCoords = (projectId: string, box: Box) => {
+      const index = mergeQueue.indexOf(projectId);
+      if (index === -1) return null;
+
+      const row = Math.floor(index / cols);
+      const col = index % cols;
+      
+      const projectData = projects.find(p => p.id === projectId);
+      if (!projectData) return null;
+
+      // Calculate scale and offset within the cell
+      const scale = Math.min(gridMetrics.baseW / projectData.imageWidth, gridMetrics.baseH / projectData.imageHeight);
+      const drawnW = projectData.imageWidth * scale;
+      const drawnH = projectData.imageHeight * scale;
+      const offX = (gridMetrics.baseW - drawnW) / 2;
+      const offY = (gridMetrics.baseH - drawnH) / 2;
+
+      // Cell origin
+      const cellX = col * gridMetrics.baseW;
+      const cellY = row * gridMetrics.baseH;
+
+      // Box coords in image space
+      const [bx1, by1, bx2, by2] = box.coordinate;
+
+      // Transform to absolute canvas space
+      const absX1 = cellX + offX + bx1 * scale;
+      const absY1 = cellY + offY + by1 * scale;
+      const absX2 = cellX + offX + bx2 * scale;
+      const absY2 = cellY + offY + by2 * scale;
+
+      return { x1: absX1, y1: absY1, x2: absX2, y2: absY2, cx: (absX1 + absX2) / 2, cy: (absY1 + absY2) / 2 };
+  };
+
+  // Helper to convert absolute canvas coords back to image local coords
+  const getLocalBoxCoords = (projectId: string, absCoords: { x1: number, y1: number, x2: number, y2: number }) => {
+      const index = mergeQueue.indexOf(projectId);
+      if (index === -1) return null;
+
+      const row = Math.floor(index / cols);
+      const col = index % cols;
+
+      const projectData = projects.find(p => p.id === projectId);
+      if (!projectData) return null;
+
+      const scale = Math.min(gridMetrics.baseW / projectData.imageWidth, gridMetrics.baseH / projectData.imageHeight);
+      const drawnW = projectData.imageWidth * scale;
+      const drawnH = projectData.imageHeight * scale;
+      const offX = (gridMetrics.baseW - drawnW) / 2;
+      const offY = (gridMetrics.baseH - drawnH) / 2;
+
+      const cellX = col * gridMetrics.baseW;
+      const cellY = row * gridMetrics.baseH;
+
+      const lx1 = (absCoords.x1 - cellX - offX) / scale;
+      const ly1 = (absCoords.y1 - cellY - offY) / scale;
+      const lx2 = (absCoords.x2 - cellX - offX) / scale;
+      const ly2 = (absCoords.y2 - cellY - offY) / scale;
+
+      return [lx1, ly1, lx2, ly2] as [number, number, number, number];
+  };
+
+  const getSnappedCoordinates = (
+    currentProjectId: string,
+    currentBoxId: string,
+    currentAbsCoords: { x1: number, y1: number, x2: number, y2: number },
+    threshold: number = 5
+  ) => {
+      let nx1 = currentAbsCoords.x1;
+      let nx2 = currentAbsCoords.x2;
+      let ny1 = currentAbsCoords.y1;
+      let ny2 = currentAbsCoords.y2;
+      
+      const w = nx2 - nx1;
+      const h = ny2 - ny1;
+      const cx = (nx1 + nx2) / 2;
+      const cy = (ny1 + ny2) / 2;
+
+      const lines: typeof snapLines = [];
+
+      // Collect all other boxes in absolute coords
+      const otherBoxes: { x1: number, y1: number, x2: number, y2: number, cx: number, cy: number }[] = [];
+      
+      mergeQueue.forEach(pid => {
+          if (!pid) return;
+          const p = projects.find(proj => proj.id === pid);
+          if (!p) return;
+          p.boxes.forEach(b => {
+              if (pid === currentProjectId && b.id === currentBoxId) return;
+              const abs = getAbsoluteBoxCoords(pid, b);
+              if (abs) otherBoxes.push(abs);
+          });
+      });
+
+      // Helper to check snap
+      const checkSnap = (val: number, type: 'vertical' | 'horizontal') => {
+          let snappedVal = val;
+          let snapped = false;
+          let snapStart = 0, snapEnd = 0;
+
+          for (const other of otherBoxes) {
+              const targets = type === 'vertical' 
+                  ? [other.x1, other.x2, other.cx] 
+                  : [other.y1, other.y2, other.cy];
+              
+              const otherStart = type === 'vertical' ? Math.min(other.y1, other.y2) : Math.min(other.x1, other.x2);
+              const otherEnd = type === 'vertical' ? Math.max(other.y1, other.y2) : Math.max(other.x1, other.x2);
+
+              for (const target of targets) {
+                  if (Math.abs(val - target) < threshold) {
+                      snappedVal = target;
+                      snapped = true;
+                      snapStart = otherStart;
+                      snapEnd = otherEnd;
+                      break;
+                  }
+              }
+              if (snapped) break;
+          }
+          return { snappedVal, snapped, snapStart, snapEnd };
+      };
+
+      // X-Axis Snapping (Vertical Lines)
+      const snapX1 = checkSnap(nx1, 'vertical');
+      const snapX2 = checkSnap(nx2, 'vertical');
+      const snapCX = checkSnap(cx, 'vertical');
+
+      if (snapX1.snapped) {
+          const diff = snapX1.snappedVal - nx1;
+          nx1 += diff; nx2 += diff;
+          lines.push({ type: 'vertical', position: nx1, start: Math.min(ny1, snapX1.snapStart), end: Math.max(ny2, snapX1.snapEnd) });
+      } else if (snapX2.snapped) {
+          const diff = snapX2.snappedVal - nx2;
+          nx1 += diff; nx2 += diff;
+          lines.push({ type: 'vertical', position: nx2, start: Math.min(ny1, snapX2.snapStart), end: Math.max(ny2, snapX2.snapEnd) });
+      } else if (snapCX.snapped) {
+          const diff = snapCX.snappedVal - cx;
+          nx1 += diff; nx2 += diff;
+          lines.push({ type: 'vertical', position: (nx1 + nx2) / 2, start: Math.min(ny1, snapCX.snapStart), end: Math.max(ny2, snapCX.snapEnd) });
+      }
+
+      // Y-Axis Snapping (Horizontal Lines)
+      const snapY1 = checkSnap(ny1, 'horizontal');
+      const snapY2 = checkSnap(ny2, 'horizontal');
+      const snapCY = checkSnap(cy, 'horizontal');
+
+      if (snapY1.snapped) {
+          const diff = snapY1.snappedVal - ny1;
+          ny1 += diff; ny2 += diff;
+          lines.push({ type: 'horizontal', position: ny1, start: Math.min(nx1, snapY1.snapStart), end: Math.max(nx2, snapY1.snapEnd) });
+      } else if (snapY2.snapped) {
+          const diff = snapY2.snappedVal - ny2;
+          ny1 += diff; ny2 += diff;
+          lines.push({ type: 'horizontal', position: ny2, start: Math.min(nx1, snapY2.snapStart), end: Math.max(nx2, snapY2.snapEnd) });
+      } else if (snapCY.snapped) {
+          const diff = snapCY.snappedVal - cy;
+          ny1 += diff; ny2 += diff;
+          lines.push({ type: 'horizontal', position: (ny1 + ny2) / 2, start: Math.min(nx1, snapCY.snapStart), end: Math.max(nx2, snapCY.snapEnd) });
+      }
+
+      return { nextAbsCoords: { x1: nx1, y1: ny1, x2: nx2, y2: ny2 }, lines };
+  };
+
   // Drag & Drop (Slot) State
   const [draggingIndex, setDraggingIndex] = useState<number | null>(null);
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
@@ -151,6 +317,82 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
       if ((e.key === 'Delete' || e.key === 'Backspace') && selectedBox) {
         if(onRecordHistory) onRecordHistory();
         deleteSelectedBox();
+      }
+
+      // Keyboard Move with Arrow Keys
+      if (selectedBox && ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) {
+          e.preventDefault();
+          const { projectId, boxId } = selectedBox;
+          const project = projects.find(p => p.id === projectId);
+          if (project) {
+              const box = project.boxes.find(b => b.id === boxId);
+              if (box) {
+                  if (onRecordHistory) onRecordHistory();
+                  
+                  // Step size: Shift=10, Ctrl/Meta=0.1, Default=1
+                  const step = e.shiftKey ? 10 : (e.ctrlKey || e.metaKey ? 0.1 : 1);
+                  let dx = 0;
+                  let dy = 0;
+
+                  if (e.key === 'ArrowUp') dy = -step;
+                  if (e.key === 'ArrowDown') dy = step;
+                  if (e.key === 'ArrowLeft') dx = -step;
+                  if (e.key === 'ArrowRight') dx = step;
+
+                  // We need to work in absolute coords for snapping across images
+                  const absCoords = getAbsoluteBoxCoords(projectId, box);
+                  if (absCoords) {
+                      // Apply movement in absolute space (approximate since scale varies per image)
+                      // Ideally we convert dx/dy to absolute space first.
+                      // Let's get scale for this project
+                      const scale = Math.min(gridMetrics.baseW / project.imageWidth, gridMetrics.baseH / project.imageHeight);
+                      const absDx = dx * scale;
+                      const absDy = dy * scale;
+
+                      let nextAbsCoords = {
+                          x1: absCoords.x1 + absDx,
+                          y1: absCoords.y1 + absDy,
+                          x2: absCoords.x2 + absDx,
+                          y2: absCoords.y2 + absDy
+                      };
+
+                      // Apply Snapping if not holding Alt
+                      if (!e.altKey) {
+                          const snapped = getSnappedCoordinates(projectId, boxId, nextAbsCoords, 5 / zoom);
+                          
+                          // Anti-Stick Logic
+                          const sx1 = snapped.nextAbsCoords.x1;
+                          const sy1 = snapped.nextAbsCoords.y1;
+                          const rx1 = nextAbsCoords.x1;
+                          const ry1 = nextAbsCoords.y1;
+
+                          const snapDiffX = sx1 - rx1;
+                          if (dx !== 0 && snapDiffX !== 0 && (snapDiffX * dx < 0)) { // Check against original dx direction
+                              snapped.nextAbsCoords.x1 = rx1;
+                              snapped.nextAbsCoords.x2 = nextAbsCoords.x2;
+                              snapped.lines = snapped.lines.filter(l => l.type !== 'vertical');
+                          }
+
+                          const snapDiffY = sy1 - ry1;
+                          if (dy !== 0 && snapDiffY !== 0 && (snapDiffY * dy < 0)) {
+                              snapped.nextAbsCoords.y1 = ry1;
+                              snapped.nextAbsCoords.y2 = nextAbsCoords.y2;
+                              snapped.lines = snapped.lines.filter(l => l.type !== 'horizontal');
+                          }
+
+                          nextAbsCoords = snapped.nextAbsCoords;
+                          setSnapLines(snapped.lines);
+                          setTimeout(() => setSnapLines([]), 1000);
+                      }
+
+                      // Convert back to local
+                      const nextLocalCoords = getLocalBoxCoords(projectId, nextAbsCoords);
+                      if (nextLocalCoords) {
+                          updateBox(projectId, boxId, { coordinate: nextLocalCoords });
+                      }
+                  }
+              }
+          }
       }
 
       // Box Copy - Capture Phase
@@ -405,7 +647,22 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
         let nextCoords: [number, number, number, number] = [x1, y1, x2, y2];
 
         if (boxDrag.type === 'move') {
-            nextCoords = [x1 + dx, y1 + dy, x2 + dx, y2 + dy];
+            const rawNextCoords: [number, number, number, number] = [x1 + dx, y1 + dy, x2 + dx, y2 + dy];
+            
+            // Convert to absolute for snapping
+            const absCoords = getAbsoluteBoxCoords(boxDrag.projectId, { ...project.boxes.find(b => b.id === boxDrag.boxId)!, coordinate: rawNextCoords });
+            
+            if (absCoords) {
+                const snapped = getSnappedCoordinates(boxDrag.projectId, boxDrag.boxId, absCoords, 5 / zoom);
+                setSnapLines(snapped.lines);
+                
+                // Convert back to local
+                const local = getLocalBoxCoords(boxDrag.projectId, snapped.nextAbsCoords);
+                if (local) nextCoords = local;
+            } else {
+                nextCoords = rawNextCoords;
+            }
+
         } else if (boxDrag.type === 'handle') {
             let nx1 = x1, ny1 = y1, nx2 = x2, ny2 = y2;
 
@@ -473,6 +730,7 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
     setIsDrawing(false);
     setDrawStart(null);
     setCurrentDrawRect(null);
+    setSnapLines([]);
   };
 
   const handleDragStart = (e: React.DragEvent, index: number) => {
@@ -938,6 +1196,22 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
                     </div>
                   );
                 })}
+
+                {/* Global Snap Lines Overlay */}
+                <svg className="absolute inset-0 w-full h-full pointer-events-none overflow-visible z-50">
+                    {snapLines.map((line, i) => (
+                        <line
+                            key={i}
+                            x1={line.type === 'vertical' ? line.position : line.start}
+                            y1={line.type === 'horizontal' ? line.position : line.start}
+                            x2={line.type === 'vertical' ? line.position : line.end}
+                            y2={line.type === 'horizontal' ? line.position : line.end}
+                            stroke="#ef4444"
+                            strokeWidth={1 / zoom}
+                            strokeDasharray="4 2"
+                        />
+                    ))}
+                </svg>
               </div>
             </div>
           </div>

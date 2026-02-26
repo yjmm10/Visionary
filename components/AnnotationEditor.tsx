@@ -57,6 +57,97 @@ const AnnotationEditor: React.FC<AnnotationEditorProps> = ({
   } | null>(null);
 
   const [panStart, setPanStart] = useState<{ x: number, y: number } | null>(null);
+  
+  // Snapping State
+  const [snapLines, setSnapLines] = useState<{ type: 'vertical' | 'horizontal', position: number, start: number, end: number }[]>([]);
+
+  const getSnappedCoordinates = (
+    currentBox: Box, 
+    allBoxes: Box[], 
+    threshold: number = 5
+  ): { nextCoords: [number, number, number, number], lines: typeof snapLines } => {
+      const [x1, y1, x2, y2] = currentBox.coordinate;
+      const w = x2 - x1;
+      const h = y2 - y1;
+      const cx = (x1 + x2) / 2;
+      const cy = (y1 + y2) / 2;
+
+      let nx1 = x1, nx2 = x2, ny1 = y1, ny2 = y2;
+      const lines: typeof snapLines = [];
+
+      // Helper to check snap
+      const checkSnap = (val: number, type: 'vertical' | 'horizontal') => {
+          let snappedVal = val;
+          let snapped = false;
+          let snapStart = 0, snapEnd = 0;
+
+          for (const other of allBoxes) {
+              if (other.id === currentBox.id) continue;
+              const [ox1, oy1, ox2, oy2] = other.coordinate;
+              const ocx = (ox1 + ox2) / 2;
+              const ocy = (oy1 + oy2) / 2;
+
+              const targets = type === 'vertical' 
+                  ? [ox1, ox2, ocx] 
+                  : [oy1, oy2, ocy];
+              
+              const otherStart = type === 'vertical' ? Math.min(oy1, oy2) : Math.min(ox1, ox2);
+              const otherEnd = type === 'vertical' ? Math.max(oy1, oy2) : Math.max(ox1, ox2);
+
+              for (const target of targets) {
+                  if (Math.abs(val - target) < threshold) {
+                      snappedVal = target;
+                      snapped = true;
+                      snapStart = otherStart;
+                      snapEnd = otherEnd;
+                      break;
+                  }
+              }
+              if (snapped) break;
+          }
+          return { snappedVal, snapped, snapStart, snapEnd };
+      };
+
+      // X-Axis Snapping (Vertical Lines)
+      const snapX1 = checkSnap(x1, 'vertical');
+      const snapX2 = checkSnap(x2, 'vertical');
+      const snapCX = checkSnap(cx, 'vertical');
+
+      if (snapX1.snapped) {
+          const diff = snapX1.snappedVal - x1;
+          nx1 += diff; nx2 += diff;
+          lines.push({ type: 'vertical', position: nx1, start: Math.min(y1, snapX1.snapStart), end: Math.max(y2, snapX1.snapEnd) });
+      } else if (snapX2.snapped) {
+          const diff = snapX2.snappedVal - x2;
+          nx1 += diff; nx2 += diff;
+          lines.push({ type: 'vertical', position: nx2, start: Math.min(y1, snapX2.snapStart), end: Math.max(y2, snapX2.snapEnd) });
+      } else if (snapCX.snapped) {
+          const diff = snapCX.snappedVal - cx;
+          nx1 += diff; nx2 += diff;
+          lines.push({ type: 'vertical', position: (nx1 + nx2) / 2, start: Math.min(y1, snapCX.snapStart), end: Math.max(y2, snapCX.snapEnd) });
+      }
+
+      // Y-Axis Snapping (Horizontal Lines)
+      const snapY1 = checkSnap(y1, 'horizontal');
+      const snapY2 = checkSnap(y2, 'horizontal');
+      const snapCY = checkSnap(cy, 'horizontal');
+
+      if (snapY1.snapped) {
+          const diff = snapY1.snappedVal - y1;
+          ny1 += diff; ny2 += diff;
+          lines.push({ type: 'horizontal', position: ny1, start: Math.min(x1, snapY1.snapStart), end: Math.max(x2, snapY1.snapEnd) });
+      } else if (snapY2.snapped) {
+          const diff = snapY2.snappedVal - y2;
+          ny1 += diff; ny2 += diff;
+          lines.push({ type: 'horizontal', position: ny2, start: Math.min(x1, snapY2.snapStart), end: Math.max(x2, snapY2.snapEnd) });
+      } else if (snapCY.snapped) {
+          const diff = snapCY.snappedVal - cy;
+          ny1 += diff; ny2 += diff;
+          lines.push({ type: 'horizontal', position: (ny1 + ny2) / 2, start: Math.min(x1, snapCY.snapStart), end: Math.max(x2, snapCY.snapEnd) });
+      }
+
+      return { nextCoords: [nx1, ny1, nx2, ny2], lines };
+  };
 
   const fitToView = useCallback(() => {
     if (containerRef.current && project.imageWidth > 0 && project.imageHeight > 0) {
@@ -98,6 +189,75 @@ const AnnotationEditor: React.FC<AnnotationEditorProps> = ({
       if ((e.key === 'Delete' || e.key === 'Backspace') && selectedBoxId) {
          if (onRecordHistory) onRecordHistory();
          deleteBox(selectedBoxId);
+      }
+
+      // Keyboard Move with Arrow Keys
+      if (selectedBoxId && ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) {
+          e.preventDefault();
+          const box = project.boxes.find(b => b.id === selectedBoxId);
+          if (box) {
+              if (onRecordHistory) onRecordHistory();
+              
+              // Step size: Shift=10, Ctrl/Meta=0.1, Default=1
+              const step = e.shiftKey ? 10 : (e.ctrlKey || e.metaKey ? 0.1 : 1);
+              let dx = 0;
+              let dy = 0;
+
+              if (e.key === 'ArrowUp') dy = -step;
+              if (e.key === 'ArrowDown') dy = step;
+              if (e.key === 'ArrowLeft') dx = -step;
+              if (e.key === 'ArrowRight') dx = step;
+
+              let nextCoords: [number, number, number, number] = [
+                  box.coordinate[0] + dx,
+                  box.coordinate[1] + dy,
+                  box.coordinate[2] + dx,
+                  box.coordinate[3] + dy
+              ];
+              
+              // Apply Snapping if not holding Alt (Alt disables snap)
+              if (!e.altKey) {
+                  const snapped = getSnappedCoordinates({ ...box, coordinate: nextCoords }, project.boxes, 5 / zoom);
+                  
+                  // Anti-Stick Logic:
+                  // If the snap pulls us in the opposite direction of our movement, ignore it.
+                  // This allows moving "out" of a snap line easily.
+                  
+                  const [sx1, sy1, sx2, sy2] = snapped.nextCoords;
+                  const [rx1, ry1, rx2, ry2] = nextCoords;
+
+                  // Check X axis snap
+                  // We compare the shift of the center or edges. 
+                  // Since we move the whole box, checking x1 shift is sufficient.
+                  const snapDiffX = sx1 - rx1;
+                  if (dx !== 0 && snapDiffX !== 0 && (snapDiffX * dx < 0)) {
+                      // Snap opposes movement, reject X snap
+                      // Revert X coords to raw
+                      snapped.nextCoords[0] = rx1;
+                      snapped.nextCoords[2] = rx2;
+                      // Remove vertical snap lines
+                      snapped.lines = snapped.lines.filter(l => l.type !== 'vertical');
+                  }
+
+                  // Check Y axis snap
+                  const snapDiffY = sy1 - ry1;
+                  if (dy !== 0 && snapDiffY !== 0 && (snapDiffY * dy < 0)) {
+                      // Snap opposes movement, reject Y snap
+                      snapped.nextCoords[1] = ry1;
+                      snapped.nextCoords[3] = ry2;
+                      // Remove horizontal snap lines
+                      snapped.lines = snapped.lines.filter(l => l.type !== 'horizontal');
+                  }
+
+                  nextCoords = snapped.nextCoords;
+                  setSnapLines(snapped.lines);
+                  
+                  // Clear snap lines after a short delay
+                  setTimeout(() => setSnapLines([]), 1000);
+              }
+
+              updateBox(box.id, { coordinate: nextCoords });
+          }
       }
 
       // Box Copy - Handled in Capture phase to prevent App from seeing it
@@ -301,7 +461,18 @@ const AnnotationEditor: React.FC<AnnotationEditorProps> = ({
     let nextCoords: [number, number, number, number] = [x1, y1, x2, y2];
 
     if (dragInfo.type === 'move') {
-      nextCoords = [x1 + dx, y1 + dy, x2 + dx, y2 + dy];
+      let rawNextCoords: [number, number, number, number] = [x1 + dx, y1 + dy, x2 + dx, y2 + dy];
+      
+      // Apply Snapping
+      const snapped = getSnappedCoordinates(
+          { ...project.boxes.find(b => b.id === dragInfo.id)!, coordinate: rawNextCoords }, 
+          project.boxes, 
+          5 / visualScale
+      );
+      
+      nextCoords = snapped.nextCoords;
+      setSnapLines(snapped.lines);
+
     } else if (dragInfo.type === 'handle') {
       // Handles: 
       // 0=TL, 1=TR, 2=BL, 3=BR
@@ -375,6 +546,7 @@ const AnnotationEditor: React.FC<AnnotationEditorProps> = ({
     setIsDrawing(false);
     setDrawStart(null);
     setCurrentDrawRect(null);
+    setSnapLines([]);
   };
 
   const resetView = () => {
@@ -612,6 +784,20 @@ const AnnotationEditor: React.FC<AnnotationEditorProps> = ({
                     </g>
                   );
                 })}
+
+                {/* Snap Lines */}
+                {snapLines.map((line, i) => (
+                    <line
+                        key={i}
+                        x1={line.type === 'vertical' ? line.position : line.start}
+                        y1={line.type === 'horizontal' ? line.position : line.start}
+                        x2={line.type === 'vertical' ? line.position : line.end}
+                        y2={line.type === 'horizontal' ? line.position : line.end}
+                        stroke="#ef4444"
+                        strokeWidth={1 / zoom}
+                        strokeDasharray="4 2"
+                    />
+                ))}
 
                 {isDrawing && currentDrawRect && (
                     <rect
