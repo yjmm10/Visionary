@@ -2,7 +2,8 @@
 import React, { useRef, useState, useEffect, useCallback } from 'react';
 import { Project, Box } from '../types';
 import { Icons, COLORS } from '../constants';
-import { ZoomIn, ZoomOut, Maximize, Eye, EyeOff, Hand, MousePointer2, RefreshCw, Square, PlusSquare } from 'lucide-react';
+import { ZoomIn, ZoomOut, Maximize, Eye, EyeOff, Hand, MousePointer2, RefreshCw, Square, PlusSquare, Download } from 'lucide-react';
+import html2canvas from 'html2canvas';
 
 interface AnnotationEditorProps {
   project: Project;
@@ -381,6 +382,50 @@ const AnnotationEditor: React.FC<AnnotationEditorProps> = ({
     setOffset({ x: 0, y: 0 });
   };
 
+  const handleSaveImage = async () => {
+    if (!canvasRef.current) return;
+    
+    // Deselect to avoid capturing handles
+    const prevSelected = selectedBoxId;
+    setSelectedBoxId(null);
+    
+    // Wait for render cycle
+    await new Promise(resolve => setTimeout(resolve, 50));
+
+    try {
+      const canvas = await html2canvas(canvasRef.current, {
+        useCORS: true,
+        scale: 2, // Better quality
+        logging: false,
+        backgroundColor: '#ffffff'
+      });
+
+      const link = document.createElement('a');
+      
+      // Determine filename
+      let filename = 'annotation_output.png';
+      if (project.input_path) {
+          // Extract filename from path (e.g., "path/to/image.jpg" -> "image")
+          const basename = project.input_path.split(/[/\\]/).pop() || 'image';
+          // Remove extension
+          const nameWithoutExt = basename.replace(/\.[^/.]+$/, "");
+          filename = `${nameWithoutExt}_annotated.png`;
+      } else {
+          filename = `project_${project.id}.png`;
+      }
+
+      link.download = filename;
+      link.href = canvas.toDataURL('image/png');
+      link.click();
+    } catch (err) {
+      console.error("Failed to save image:", err);
+      alert("Failed to save image.");
+    } finally {
+        // Restore selection
+        if (prevSelected) setSelectedBoxId(prevSelected);
+    }
+  };
+
   const hasCanvas = project.imageWidth > 0 && project.imageHeight > 0;
   
   let cursorClass = 'cursor-default';
@@ -453,11 +498,21 @@ const AnnotationEditor: React.FC<AnnotationEditorProps> = ({
                </button>
             </div>
           </div>
-          <label className="flex items-center gap-2 px-3 py-1 bg-white hover:bg-slate-50 rounded cursor-pointer transition-colors border border-slate-200 shadow-sm">
-            <Icons.ImageIcon size={14} className="text-slate-600" />
-            <span className="text-[11px] font-semibold text-slate-900">Change Image</span>
-            <input type="file" className="hidden" accept="image/*" onChange={handleFileChange} />
-          </label>
+          <div className="flex items-center gap-2">
+            <button
+               onClick={handleSaveImage}
+               className="flex items-center gap-2 px-3 py-1 bg-white hover:bg-slate-50 rounded cursor-pointer transition-colors border border-slate-200 shadow-sm text-slate-900"
+               title="Save Image"
+             >
+               <Download size={14} className="text-slate-600" />
+               <span className="text-[11px] font-semibold">Save</span>
+             </button>
+            <label className="flex items-center gap-2 px-3 py-1 bg-white hover:bg-slate-50 rounded cursor-pointer transition-colors border border-slate-200 shadow-sm">
+              <Icons.ImageIcon size={14} className="text-slate-600" />
+              <span className="text-[11px] font-semibold text-slate-900">Change Image</span>
+              <input type="file" className="hidden" accept="image/*" onChange={handleFileChange} />
+            </label>
+          </div>
         </div>
         
         <div 

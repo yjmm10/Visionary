@@ -46,8 +46,9 @@ const JsonUploader: React.FC<JsonUploaderProps> = ({ onUpload }) => {
         });
 
         // Use A4-ish standard (approx 1240x1754 at ~150dpi) as minimum, or expand to fit content + margin
-        const imageWidth = Math.max(1240, Math.ceil(maxX + 100));
-        const imageHeight = Math.max(1754, Math.ceil(maxY + 100));
+        // If dimensions are provided in JSON, use them.
+        const imageWidth = data.imageWidth || Math.max(1240, Math.ceil(maxX + 100));
+        const imageHeight = data.imageHeight || Math.max(1754, Math.ceil(maxY + 100));
 
         newProjects.push({
           id: `proj-${Math.random().toString(36).substr(2, 9)}-${Date.now()}`,
