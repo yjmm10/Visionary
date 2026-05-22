@@ -121,7 +121,7 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
 
       // Cell origin
       const cellX = col * gridMetrics.baseW;
-      const cellY = row * gridMetrics.baseH;
+      const cellY = row * gridMetrics.baseH + (gridMetrics.topHeight || 0);
 
       // Box coords in image space
       const [bx1, by1, bx2, by2] = box.coordinate;
@@ -157,7 +157,7 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
       const offY = (cellH - drawnH) / 2;
 
       const cellX = col * gridMetrics.baseW;
-      const cellY = row * gridMetrics.baseH;
+      const cellY = row * gridMetrics.baseH + (gridMetrics.topHeight || 0);
 
       const lx1 = (absCoords.x1 - cellX - offX) / scale;
       const ly1 = (absCoords.y1 - cellY - offY) / scale;
@@ -305,11 +305,38 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
       ? definingProject.imageHeight 
       : 1754; 
 
-    const totalW = baseW * cols;
-    const totalH = baseH * rows;
+    // Get all active negative indices (representing global headers/footers)
+    const activeBanners = Object.entries(cellConfigs)
+      .filter(([k]) => parseInt(k) < 0)
+      .map(([k, config]) => ({ id: parseInt(k), config }))
+      .sort((a, b) => b.id - a.id); // Sort negative numbers nicely
 
-    return { baseW, baseH, totalW, totalH };
-  }, [mergeQueue, projects, rows, cols]);
+    const topBanners = activeBanners.filter(b => b.config.verticalAlign !== 'bottom');
+    const bottomBanners = activeBanners.filter(b => b.config.verticalAlign === 'bottom');
+
+    const getBannerHeight = (b: CellConfig) => {
+      if (b.overlay) return 0;
+      if (b.bannerHeight !== undefined && b.bannerHeight > 0) return b.bannerHeight;
+      return Math.round((b.fontSize || 36) * 1.8);
+    };
+
+    const topHeight = topBanners.reduce((sum, b) => sum + getBannerHeight(b.config), 0);
+    const bottomHeight = bottomBanners.reduce((sum, b) => sum + getBannerHeight(b.config), 0);
+
+    const totalW = baseW * cols;
+    const totalH = baseH * rows + topHeight + bottomHeight;
+
+    return { 
+      baseW, 
+      baseH, 
+      totalW, 
+      totalH, 
+      topHeight, 
+      bottomHeight, 
+      topBanners, 
+      bottomBanners 
+    };
+  }, [mergeQueue, projects, rows, cols, cellConfigs]);
 
   // Fit to View Logic
   const fitToView = useCallback(() => {
@@ -725,15 +752,17 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
      const relX = (clientX - containerRef.current!.getBoundingClientRect().left - offset.x) / zoom;
      const relY = (clientY - containerRef.current!.getBoundingClientRect().top - offset.y) / zoom;
 
-     if (relX < 0 || relY < 0 || relX > gridMetrics.totalW || relY > gridMetrics.totalH) return null;
+     const gridY = relY - (gridMetrics.topHeight || 0);
+
+     if (relX < 0 || gridY < 0 || relX > gridMetrics.totalW || gridY > (gridMetrics.baseH * rows)) return null;
 
      const col = Math.floor(relX / gridMetrics.baseW);
-     const row = Math.floor(relY / gridMetrics.baseH);
+     const row = Math.floor(gridY / gridMetrics.baseH);
      const index = row * cols + col;
 
      if (index >= 0 && index < totalSlots && mergeQueue[index]) {
          const localX = relX % gridMetrics.baseW;
-         const localY = relY % gridMetrics.baseH;
+         const localY = gridY % gridMetrics.baseH;
          return { projectId: mergeQueue[index]!, localX, localY };
      }
      return null;
@@ -831,7 +860,7 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
          // Using modulo to find local coordinate within the current hovered cell-space
          // Note: this assumes drawing stays within a cell visually or maps to it
          const localX = relX % gridMetrics.baseW;
-         const localY = relY % gridMetrics.baseH;
+         const localY = (relY - (gridMetrics.topHeight || 0)) % gridMetrics.baseH;
          
          const scale = Math.min(gridMetrics.baseW / project.imageWidth, gridMetrics.baseH / project.imageHeight);
          const drawnW = project.imageWidth * scale;
@@ -1115,93 +1144,262 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
   };
 
   const handleExport = async (mode: 'copy' | 'download') => {
-    if (!contentRef.current || copying) return;
+    if (copying) return;
     setCopying(true);
-    
-    // We don't need to clear selection state in the live app because we will clone the node
-    // and clean up the clone instead. This prevents flickering.
 
     try {
-      const originalNode = contentRef.current;
-      const clone = originalNode.cloneNode(true) as HTMLElement;
+      const canvas = document.createElement('canvas');
+      canvas.width = gridMetrics.totalW;
+      canvas.height = gridMetrics.totalH;
+      const ctx = canvas.getContext('2d');
       
-      // Create a container for the clone that isolates it from the app's layout/transforms
-      const container = document.createElement('div');
-      container.style.position = 'fixed'; // Use fixed to ensure it's rendered in viewport (but hidden)
-      container.style.top = '0';
-      container.style.left = '0';
-      container.style.zIndex = '-9999';
-      container.style.opacity = '0';
-      container.style.pointerEvents = 'none';
-      container.style.width = `${gridMetrics.totalW}px`;
-      container.style.height = `${gridMetrics.totalH}px`;
-      container.style.overflow = 'hidden';
-      container.style.backgroundColor = '#ffffff'; // Ensure white background
-      
-      // Reset any transforms on the clone itself (though contentRef usually doesn't have them)
-      clone.style.transform = 'none';
-      clone.style.margin = '0';
-      clone.style.width = '100%';
-      clone.style.height = '100%';
-      
-      // CLEANUP: Remove UI artifacts from the clone
-      // 1. Remove selection rings and drag effects
-      const cells = clone.querySelectorAll('div[data-idx]');
-      cells.forEach(cell => {
-          cell.classList.remove('ring-4', 'ring-blue-500', 'ring-inset', 'ring-2', 'z-10', 'z-20', 'opacity-50', 'cursor-grab', 'cursor-grabbing');
-          // Ensure background is white
-          (cell as HTMLElement).style.backgroundColor = '#ffffff';
-      });
+      if (!ctx) {
+          throw new Error("Could not get canvas context");
+      }
 
-      // 2. Remove resize handles (circles)
-      const handles = clone.querySelectorAll('circle');
-      handles.forEach(h => h.remove());
+      // 1. Fill Background
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-      // 3. Remove Snap Lines SVG (usually z-50)
-      const svgs = clone.querySelectorAll('svg');
-      svgs.forEach(svg => {
-          if (svg.style.zIndex === '50' || svg.classList.contains('z-50')) {
-              svg.remove();
-          }
-      });
+      // 2. Pre-load all images
+      const uniqueProjectIds = Array.from(new Set(mergeQueue.filter(id => id !== null))) as string[];
+      const loadedImages = new Map<string, HTMLImageElement>();
 
-      container.appendChild(clone);
-      document.body.appendChild(container);
-
-      // Wait for images to load in the clone
-      const imgs = Array.from(clone.querySelectorAll('img'));
-      await Promise.all(imgs.map(img => {
-        if (img.complete) return Promise.resolve();
-        return new Promise((resolve) => {
-          img.onload = resolve;
-          img.onerror = resolve;
-          // Timeout fallback
-          setTimeout(resolve, 1000);
-        });
+      await Promise.all(uniqueProjectIds.map(pid => {
+          return new Promise<void>((resolve) => {
+              const project = projects.find(p => p.id === pid);
+              if (!project || !project.imageUrl) {
+                  resolve();
+                  return;
+              }
+              const img = new Image();
+              
+              // Only set crossOrigin for remote URLs
+              if (!project.imageUrl.startsWith('data:') && !project.imageUrl.startsWith('blob:')) {
+                  img.crossOrigin = 'anonymous';
+              }
+              
+              img.onload = () => {
+                  loadedImages.set(pid, img);
+                  resolve();
+              };
+              img.onerror = () => {
+                  console.warn(`Failed to load image for project ${pid}`);
+                  resolve();
+              };
+              img.src = project.imageUrl;
+          });
       }));
 
-      // Small delay to ensure layout is stable
-      await new Promise(r => setTimeout(r, 100));
+      // 3. Draw Grid Content
+      for (let r = 0; r < rows; r++) {
+          for (let c = 0; c < cols; c++) {
+              const idx = r * cols + c;
+              
+              // Check for spans
+              const span = getSpanCovering(r, c);
+              const isStart = span ? (span.row === r && span.col === c) : true;
+              
+              // If covered but not start, skip
+              if (span && !isStart) continue;
+              
+              // Calculate Cell Dimensions
+              const cellX = c * gridMetrics.baseW;
+              const cellY = r * gridMetrics.baseH + (gridMetrics.topHeight || 0);
+              const cellW = span ? gridMetrics.baseW * span.colSpan : gridMetrics.baseW;
+              const cellH = span ? gridMetrics.baseH * span.rowSpan : gridMetrics.baseH;
+              
+              const projectId = mergeQueue[idx];
+              const project = projects.find(p => p.id === projectId);
+              
+              if (project) {
+                  // Calculate "object-fit: contain" logic
+                  // We need these metrics for both image and boxes
+                  const scale = Math.min(cellW / project.imageWidth, cellH / project.imageHeight);
+                  const drawnW = project.imageWidth * scale;
+                  const drawnH = project.imageHeight * scale;
+                  const offX = (cellW - drawnW) / 2;
+                  const offY = (cellH - drawnH) / 2;
 
-      const canvas = await html2canvas(clone, {
-        useCORS: true,
-        scale: 2, // Higher quality
-        backgroundColor: '#ffffff',
-        logging: false,
-        width: gridMetrics.totalW,
-        height: gridMetrics.totalH,
-        windowWidth: gridMetrics.totalW,
-        windowHeight: gridMetrics.totalH,
-        x: 0,
-        y: 0,
-        scrollX: 0,
-        scrollY: 0,
-        // We've already manually cleaned the DOM, so we don't need aggressive ignoreElements
-        ignoreElements: (element) => {
-            return false; 
-        }
+                  // Draw Image if loaded
+                  if (loadedImages.has(project.id)) {
+                      const img = loadedImages.get(project.id)!;
+                      ctx.drawImage(img, cellX + offX, cellY + offY, drawnW, drawnH);
+                  } else {
+                      // Draw placeholder if image failed
+                      ctx.fillStyle = '#f1f5f9'; // slate-100
+                      ctx.fillRect(cellX, cellY, cellW, cellH);
+                      ctx.fillStyle = '#94a3b8'; // slate-400
+                      ctx.font = '14px sans-serif';
+                      ctx.textAlign = 'center';
+                      ctx.textBaseline = 'middle';
+                      ctx.fillText('Image not loaded', cellX + cellW/2, cellY + cellH/2);
+                  }
+                  
+                  // Draw Boxes (ALWAYS draw boxes even if image missing)
+                  project.boxes.forEach(box => {
+                      const color = COLORS[box.cls_id % COLORS.length];
+                      const [bx1, by1, bx2, by2] = box.coordinate;
+                      
+                      // Transform box coords to canvas coords
+                      const absX = cellX + offX + (Math.min(bx1, bx2) * scale);
+                      const absY = cellY + offY + (Math.min(by1, by2) * scale);
+                      const absW = Math.abs(bx2 - bx1) * scale;
+                      const absH = Math.abs(by2 - by1) * scale;
+                      
+                      // Fill
+                      ctx.globalAlpha = boxOpacity;
+                      ctx.fillStyle = color;
+                      ctx.fillRect(absX, absY, absW, absH);
+                      
+                      // Stroke
+                      ctx.globalAlpha = 1.0;
+                      ctx.strokeStyle = color;
+                      ctx.lineWidth = Math.max(1, (project.imageWidth / 200) * scale); 
+                      ctx.strokeRect(absX, absY, absW, absH);
+                      
+                      // Label
+                      if (showLabels) {
+                           const fontSize = Math.max(14, project.imageWidth * 0.015) * scale;
+                           ctx.fillStyle = color;
+                           ctx.font = `bold ${fontSize}px sans-serif`;
+                           ctx.textBaseline = 'bottom';
+                           ctx.textAlign = 'left';
+                           // Shadow for readability
+                           ctx.shadowColor = 'white';
+                           ctx.shadowBlur = 2;
+                           ctx.fillText(box.label || '', absX, absY - (project.imageWidth * 0.005 * scale));
+                           ctx.shadowBlur = 0; // Reset
+                      }
+                  });
+              }
+
+              // Draw Cell Header Text
+              const config = cellConfigs[idx];
+              if (config && config.text) {
+                  const fontSize = config.fontSize || 16;
+                  ctx.font = `500 ${fontSize}px sans-serif`;
+                  ctx.fillStyle = config.color || '#000000';
+                  
+                  // Horizontal Align
+                  let textX = cellX;
+                  if (config.horizontalAlign === 'center') {
+                      ctx.textAlign = 'center';
+                      textX = cellX + (cellW / 2) + (config.offsetX || 0);
+                  } else if (config.horizontalAlign === 'right') {
+                      ctx.textAlign = 'right';
+                      textX = cellX + cellW - (config.offsetX || 10);
+                  } else {
+                      ctx.textAlign = 'left';
+                      textX = cellX + (config.offsetX || 10);
+                  }
+                  
+                  // Vertical Align
+                  let textY = cellY;
+                  if (config.verticalAlign === 'bottom') {
+                      ctx.textBaseline = 'bottom';
+                      textY = cellY + cellH - (config.offsetY || 10);
+                  } else {
+                      ctx.textBaseline = 'top';
+                      textY = cellY + (config.offsetY || 10);
+                  }
+                  
+                  ctx.fillText(config.text, textX, textY);
+              }
+          }
+      }
+
+      // Draw Top Global Banners
+      let currentY = 0;
+      gridMetrics.topBanners.forEach(({ id, config }) => {
+          const fontSize = config.fontSize || 36;
+          const bannerH = config.overlay ? 0 : (config.bannerHeight && config.bannerHeight > 0 
+              ? config.bannerHeight 
+              : Math.round(fontSize * 1.8));
+
+          const drawH = config.bannerHeight && config.bannerHeight > 0 
+              ? config.bannerHeight 
+              : Math.round(fontSize * 1.8);
+
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(0, currentY, canvas.width, drawH);
+          ctx.clip(); // Keep drawing within banner bounds
+
+          if (config.bgColor && config.bgColor !== 'transparent') {
+              ctx.fillStyle = config.bgColor;
+              ctx.fillRect(0, currentY, canvas.width, drawH);
+          }
+
+          ctx.font = `bold ${fontSize}px sans-serif`;
+          ctx.fillStyle = config.color || '#000000';
+          
+          let textX = canvas.width / 2;
+          if (config.horizontalAlign === 'left') {
+              ctx.textAlign = 'left';
+              textX = 40 + (config.offsetX || 0);
+          } else if (config.horizontalAlign === 'right') {
+              ctx.textAlign = 'right';
+              textX = canvas.width - 40 - (config.offsetX || 0);
+          } else {
+              ctx.textAlign = 'center';
+              textX = (canvas.width / 2) + (config.offsetX || 0);
+          }
+          
+          ctx.textBaseline = 'middle';
+          const textY = currentY + (drawH / 2) + (config.offsetY || 0);
+          ctx.fillText(config.text, textX, textY);
+          ctx.restore();
+
+          currentY += bannerH;
       });
 
+      // Draw Bottom Global Banners
+      let bottomY = canvas.height - gridMetrics.bottomHeight;
+      gridMetrics.bottomBanners.forEach(({ id, config }) => {
+          const fontSize = config.fontSize || 36;
+          const bannerH = config.overlay ? 0 : (config.bannerHeight && config.bannerHeight > 0 
+              ? config.bannerHeight 
+              : Math.round(fontSize * 1.8));
+
+          const drawH = config.bannerHeight && config.bannerHeight > 0 
+              ? config.bannerHeight 
+              : Math.round(fontSize * 1.8);
+
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(0, bottomY, canvas.width, drawH);
+          ctx.clip(); // Keep drawing within banner bounds
+
+          if (config.bgColor && config.bgColor !== 'transparent') {
+              ctx.fillStyle = config.bgColor;
+              ctx.fillRect(0, bottomY, canvas.width, drawH);
+          }
+
+          ctx.font = `bold ${fontSize}px sans-serif`;
+          ctx.fillStyle = config.color || '#000000';
+          
+          let textX = canvas.width / 2;
+          if (config.horizontalAlign === 'left') {
+              ctx.textAlign = 'left';
+              textX = 40 + (config.offsetX || 0);
+          } else if (config.horizontalAlign === 'right') {
+              ctx.textAlign = 'right';
+              textX = canvas.width - 40 - (config.offsetX || 0);
+          } else {
+              ctx.textAlign = 'center';
+              textX = (canvas.width / 2) + (config.offsetX || 0);
+          }
+          
+          ctx.textBaseline = 'middle';
+          const textY = bottomY + (drawH / 2) + (config.offsetY || 0);
+          ctx.fillText(config.text, textX, textY);
+          ctx.restore();
+
+          bottomY += bannerH;
+      });
+
+      // 4. Export
       if (mode === 'copy') {
         canvas.toBlob(async (blob) => {
           if (blob) {
@@ -1233,15 +1431,34 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
         document.body.removeChild(link);
       }
       
-      // Clean up
-      document.body.removeChild(container);
-      
     } catch (err) {
       console.error("Export failed", err);
-      alert("Failed to generate image.");
+      alert("Failed to generate image. If images are from external sources, this may be a CORS issue.");
     } finally {
       setCopying(false);
     }
+  };
+
+  const handleAddGlobalRow = () => {
+    if (!setCellConfigs) return;
+    // Find next unused negative index
+    let nextKey = -1;
+    while (cellConfigs[nextKey] !== undefined) {
+      nextKey--;
+    }
+    setCellConfigs({
+      ...cellConfigs,
+      [nextKey]: {
+        text: '',
+        offsetX: 0,
+        offsetY: 0,
+        fontSize: 24,
+        color: '#000000',
+        horizontalAlign: 'center',
+        verticalAlign: 'top', // top / bottom
+      }
+    });
+    setSelectedCellIndex(nextKey);
   };
 
   let cursorClass = 'cursor-default';
@@ -1249,6 +1466,102 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
   if (tool === 'draw') cursorClass = 'cursor-crosshair';
 
   const selectedProject = selectedBox ? projects.find(p => p.id === selectedBox.projectId) : null;
+
+  const renderBanner = (id: number, config: CellConfig) => {
+    const getBannerRealHeight = () => {
+      if (config.bannerHeight !== undefined && config.bannerHeight > 0) return config.bannerHeight;
+      return Math.round((config.fontSize || 36) * 1.8);
+    };
+
+    const isSelected = selectedCellIndex === id;
+    const isOverlay = config.overlay;
+    const bannerHeight = getBannerRealHeight();
+
+    // Calculate accumulation of preceding banners of same verticalAlign
+    const isTop = config.verticalAlign !== 'bottom';
+    const precedingBanners = isTop ? gridMetrics.topBanners : gridMetrics.bottomBanners;
+    const myIndex = precedingBanners.findIndex(b => b.id === id);
+
+    let overlayOffset = 0;
+    if (isOverlay && myIndex > -1) {
+      for (let i = 0; i < myIndex; i++) {
+        if (precedingBanners[i].config.overlay) {
+          const configI = precedingBanners[i].config;
+          const h = configI.bannerHeight !== undefined && configI.bannerHeight > 0 
+            ? configI.bannerHeight 
+            : Math.round((configI.fontSize || 36) * 1.8);
+          overlayOffset += h;
+        }
+      }
+    }
+
+    return (
+      <div 
+        key={`banner-${id}`}
+        className={`w-full relative shrink-0 group/global select-none ${isSelected ? 'ring-2 ring-blue-500 ring-inset' : ''}`}
+        style={{ 
+          height: isOverlay ? 0 : bannerHeight,
+          overflow: isOverlay ? 'visible' : 'hidden',
+          backgroundColor: isOverlay ? 'transparent' : (config.bgColor || '#ffffff'),
+          borderBottom: isOverlay ? 'none' : '1px dashed #e2e8f0',
+          zIndex: isOverlay ? 45 : 10,
+        }}
+        onClick={(e) => {
+          e.stopPropagation();
+          setSelectedBox(null);
+          setSelectedCellIndex(id);
+        }}
+      >
+        <div
+          className={`w-full flex items-center justify-center relative ${isSelected ? 'bg-blue-50/20' : 'hover:bg-slate-50/50'}`}
+          style={{
+            height: bannerHeight,
+            transform: isOverlay ? `translateY(${overlayOffset}px)` : 'none',
+            backgroundColor: isOverlay && isSelected ? 'rgba(59, 130, 246, 0.08)' : (isOverlay ? 'transparent' : (config.bgColor || '#ffffff')),
+          }}
+        >
+          {/* Remove banner button on hover if not the last one */}
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              if (setCellConfigs) {
+                const nextConfigs = { ...cellConfigs };
+                delete nextConfigs[id];
+                setCellConfigs(nextConfigs);
+                if (selectedCellIndex === id) setSelectedCellIndex(null);
+              }
+            }}
+            className="absolute right-3 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded opacity-0 group-hover/global:opacity-100 transition-opacity z-30 pointer-events-auto"
+            title="Delete Global Row"
+          >
+            <Trash2 size={12} />
+          </button>
+
+          {config.text ? (
+            <div 
+              style={{
+                fontSize: config.fontSize || 36,
+                color: config.color || '#000000',
+                textAlign: config.horizontalAlign || 'center',
+                fontFamily: 'sans-serif',
+                fontWeight: 'bold',
+                transform: `translate(${config.offsetX ?? 0}px, ${config.offsetY ?? 0}px)`,
+                whiteSpace: 'pre-wrap',
+              }}
+              className="w-full text-center px-10 select-text font-sans pointer-events-auto"
+            >
+              {config.text}
+            </div>
+          ) : (
+            <div className="text-slate-300 text-xs font-mono tracking-wider italic flex items-center gap-1 opacity-60 group-hover/global:opacity-100 transition-opacity pointer-events-auto">
+              <PlusSquare size={12} />
+              {id === -1 ? 'Click to add global layout title (rendered on export)' : 'Click to add global row text'}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  };
 
   return (
     <div className="h-full flex flex-col gap-6 overflow-hidden">
@@ -1409,14 +1722,25 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
                 width: gridMetrics.totalW, 
                 height: gridMetrics.totalH,
               }}
-              className="bg-white shadow-2xl transition-transform duration-75 ease-out"
+              className="bg-white shadow-2xl transition-transform duration-75 ease-out flex flex-col relative"
             >
+              {/* Top Global Banners */}
+              {gridMetrics.topBanners.length > 0 ? (
+                gridMetrics.topBanners.map(({ id, config }) => renderBanner(id, config))
+              ) : (
+                (!Object.keys(cellConfigs).some(k => parseInt(k) < 0)) && (
+                  renderBanner(-1, { text: '', offsetX: 0, offsetY: 0, fontSize: 36, color: '#000000', horizontalAlign: 'center', verticalAlign: 'top' })
+                )
+              )}
+
               {/* Grid Content */}
               <div 
                 ref={contentRef}
-                className="w-full h-full bg-white"
+                className="bg-white shrink-0"
                 style={{
                   display: 'grid',
+                  width: `${gridMetrics.baseW * cols}px`,
+                  height: `${gridMetrics.baseH * rows}px`,
                   gridTemplateColumns: `repeat(${cols}, ${gridMetrics.baseW}px)`,
                   gridTemplateRows: `repeat(${rows}, ${gridMetrics.baseH}px)`,
                   gap: '0px'
@@ -1468,7 +1792,7 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
                           {/* Cell Header Text */}
                           {cellConfigs[idx]?.text && (
                             <div 
-                                className="absolute z-20 pointer-events-none whitespace-nowrap"
+                                className="absolute z-20 pointer-events-none whitespace-pre opacity-100 group-hover:opacity-20 focus-within:opacity-20 transition-opacity duration-200"
                                 style={{
                                 top: cellConfigs[idx]?.verticalAlign === 'bottom' ? 'auto' : (cellConfigs[idx]?.offsetY ?? 10),
                                 bottom: cellConfigs[idx]?.verticalAlign === 'bottom' ? (cellConfigs[idx]?.offsetY ?? 10) : 'auto',
@@ -1490,6 +1814,35 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
                                 }}
                             >
                                 {cellConfigs[idx].text}
+                            </div>
+                          )}
+
+                          {/* Quick Header Text Input at the top of the image */}
+                          {project && (
+                            <div 
+                              className="absolute top-2 left-1/2 -translate-x-1/2 z-30 w-11/12 max-w-[200px] opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity duration-200 pointer-events-auto"
+                              onMouseDown={(e) => {
+                                e.stopPropagation();
+                              }}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                              }}
+                            >
+                              <input
+                                type="text"
+                                placeholder="+ Input top text..."
+                                value={cellConfigs[idx]?.text || ''}
+                                onChange={(e) => {
+                                  if (setCellConfigs) {
+                                    const currentConfig = cellConfigs[idx] || { offsetX: 10, offsetY: 10, fontSize: 16, color: '#000000', horizontalAlign: 'center', verticalAlign: 'top' };
+                                    setCellConfigs({
+                                      ...cellConfigs,
+                                      [idx]: { ...currentConfig, text: e.target.value }
+                                    });
+                                  }
+                                }}
+                                className="w-full text-center text-[10px] font-mono tracking-wider bg-white/95 backdrop-blur-sm border-b border-dashed border-slate-300 hover:border-slate-500 focus:border-slate-800 focus:border-solid rounded px-1.5 py-0.5 text-slate-800 transition-all outline-none"
+                              />
                             </div>
                           )}
 
@@ -1631,35 +1984,32 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
                     ))}
                 </svg>
               </div>
+
+              {/* Bottom Global Banners */}
+              {gridMetrics.bottomBanners.map(({ id, config }) => renderBanner(id, config))}
             </div>
           </div>
         </div>
 
         {/* Right Sidebar */}
-        <div className="w-80 shrink-0 flex flex-col gap-6 min-h-0">
+        <div className="w-64 shrink-0 flex flex-col gap-3 min-h-0">
           
           {/* Panel 0: Cell Settings (Only visible when a cell is selected) */}
           {selectedCellIndex !== null && (
             <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm flex flex-col shrink-0 animate-in fade-in slide-in-from-right-4 duration-300">
-              <div className="p-3 border-b border-slate-100 bg-slate-50 flex items-center justify-between">
-                <h3 className="text-xs font-bold uppercase tracking-widest text-slate-500 flex items-center gap-2">
-                  <Settings size={12} />
-                  Cell Settings
+              <div className="p-2 border-b border-slate-100 bg-slate-50 flex items-center justify-between">
+                <h3 className="text-[10px] font-bold uppercase tracking-widest text-slate-500 flex items-center gap-1.5">
+                  <Settings size={10} />
+                  {selectedCellIndex < 0 ? 'Global Banner Settings' : 'Cell Settings'}
                 </h3>
                 <button onClick={() => setSelectedCellIndex(null)} className="text-slate-400 hover:text-slate-600 transition-colors">
-                  <X size={14} />
+                  <X size={12} />
                 </button>
               </div>
               
-              <div className="p-4 space-y-4">
-                {/* Header Text Config */}
-                <div className="space-y-3">
-                  <h4 className="text-xs font-bold text-slate-800 flex items-center gap-2">
-                    Header Text
-                  </h4>
-                  
-                  <div className="space-y-2">
-                    <label className="text-[10px] font-bold text-slate-500 uppercase">Content</label>
+              <div className="p-2 space-y-2">
+                  <div className="space-y-0.5">
+                    <label className="text-[9px] font-bold text-slate-400 uppercase">Content</label>
                     <input 
                       type="text" 
                       value={cellConfigs[selectedCellIndex]?.text || ''}
@@ -1672,14 +2022,14 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
                           });
                         }
                       }}
-                      placeholder="Enter header text..."
-                      className="w-full text-xs px-2 py-1.5 bg-white border border-slate-200 rounded focus:outline-none focus:ring-2 focus:ring-blue-500 transition-shadow"
+                      placeholder="Header text..."
+                      className="w-full text-[10px] px-2 py-1 bg-slate-50 border border-slate-200 rounded focus:outline-none focus:ring-1 focus:ring-blue-500"
                     />
                   </div>
 
-                  <div className="grid grid-cols-2 gap-3">
-                    <div className="space-y-1">
-                      <label className="text-[10px] font-bold text-slate-500 uppercase">Offset X</label>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div className="space-y-0.5">
+                      <label className="text-[9px] font-bold text-slate-400 uppercase">Offset X</label>
                       <input 
                         type="number" 
                         value={cellConfigs[selectedCellIndex]?.offsetX ?? 10}
@@ -1692,11 +2042,11 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
                             });
                           }
                         }}
-                        className="w-full text-xs px-2 py-1 bg-white border border-slate-200 rounded focus:outline-none focus:ring-1 focus:ring-blue-500"
+                        className="w-full text-[10px] px-1.5 py-0.5 bg-slate-50 border border-slate-200 rounded focus:outline-none focus:ring-1 focus:ring-blue-500"
                       />
                     </div>
-                    <div className="space-y-1">
-                      <label className="text-[10px] font-bold text-slate-500 uppercase">Offset Y</label>
+                    <div className="space-y-0.5">
+                      <label className="text-[9px] font-bold text-slate-400 uppercase">Offset Y</label>
                       <input 
                         type="number" 
                         value={cellConfigs[selectedCellIndex]?.offsetY ?? 10}
@@ -1709,68 +2059,143 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
                             });
                           }
                         }}
-                        className="w-full text-xs px-2 py-1 bg-white border border-slate-200 rounded focus:outline-none focus:ring-1 focus:ring-blue-500"
+                        className="w-full text-[10px] px-1.5 py-0.5 bg-slate-50 border border-slate-200 rounded focus:outline-none focus:ring-1 focus:ring-blue-500"
                       />
                     </div>
                   </div>
 
-                  <div className="space-y-1">
-                    <label className="text-[10px] font-bold text-slate-500 uppercase">Horizontal Alignment</label>
-                    <div className="flex bg-slate-100 p-0.5 rounded-md">
-                        {['left', 'center', 'right'].map((align) => (
-                            <button
-                                key={align}
-                                onClick={() => {
-                                    if (setCellConfigs) {
-                                        const currentConfig = cellConfigs[selectedCellIndex] || { text: '', offsetX: 10, offsetY: 10, fontSize: 16, color: '#000000' };
-                                        setCellConfigs({
-                                            ...cellConfigs,
-                                            [selectedCellIndex]: { ...currentConfig, horizontalAlign: align as any }
-                                        });
-                                    }
-                                }}
-                                className={`flex-1 text-[10px] uppercase font-bold py-1 rounded-sm transition-colors ${
-                                    (cellConfigs[selectedCellIndex]?.horizontalAlign || 'left') === align 
-                                    ? 'bg-white text-slate-900 shadow-sm' 
-                                    : 'text-slate-400 hover:text-slate-600'
-                                }`}
-                            >
-                                {align}
-                            </button>
-                        ))}
-                    </div>
+                  <div className="grid grid-cols-2 gap-2">
+                     <div className={`space-y-0.5 ${selectedCellIndex < 0 ? 'col-span-2' : ''}`}>
+                        <label className="text-[9px] font-bold text-slate-400 uppercase">H-Align</label>
+                        <div className="flex bg-slate-100 p-0.5 rounded">
+                            {['left', 'center', 'right'].map((align) => (
+                                <button
+                                    key={align}
+                                    onClick={() => {
+                                        if (setCellConfigs) {
+                                            const currentConfig = cellConfigs[selectedCellIndex] || { text: '', offsetX: 10, offsetY: 10, fontSize: 16, color: '#000000' };
+                                            setCellConfigs({
+                                                ...cellConfigs,
+                                                [selectedCellIndex]: { ...currentConfig, horizontalAlign: align as any }
+                                            });
+                                        }
+                                    }}
+                                    className={`flex-1 text-[9px] uppercase font-bold py-0.5 rounded-sm transition-colors ${
+                                        (cellConfigs[selectedCellIndex]?.horizontalAlign || (selectedCellIndex < 0 ? 'center' : 'left')) === align 
+                                        ? 'bg-white text-slate-900 shadow-sm' 
+                                        : 'text-slate-400 hover:text-slate-600'
+                                    }`}
+                                >
+                                    {align.charAt(0).toUpperCase()}
+                                </button>
+                            ))}
+                        </div>
+                     </div>
+                     {selectedCellIndex >= 0 && (
+                       <div className="space-y-0.5">
+                          <label className="text-[9px] font-bold text-slate-400 uppercase">V-Align</label>
+                          <div className="flex bg-slate-100 p-0.5 rounded">
+                              {['top', 'bottom'].map((align) => (
+                                  <button
+                                      key={align}
+                                      onClick={() => {
+                                          if (setCellConfigs) {
+                                              const currentConfig = cellConfigs[selectedCellIndex] || { text: '', offsetX: 10, offsetY: 10, fontSize: 16, color: '#000000' };
+                                              setCellConfigs({
+                                                  ...cellConfigs,
+                                                  [selectedCellIndex]: { ...currentConfig, verticalAlign: align as any }
+                                              });
+                                          }
+                                      }}
+                                      className={`flex-1 text-[9px] uppercase font-bold py-0.5 rounded-sm transition-colors ${
+                                          (cellConfigs[selectedCellIndex]?.verticalAlign || 'top') === align 
+                                          ? 'bg-white text-slate-900 shadow-sm' 
+                                          : 'text-slate-400 hover:text-slate-600'
+                                      }`}
+                                  >
+                                      {align.charAt(0).toUpperCase()}
+                                  </button>
+                              ))}
+                          </div>
+                       </div>
+                     )}
                   </div>
 
-                  <div className="space-y-1">
-                    <label className="text-[10px] font-bold text-slate-500 uppercase">Vertical Alignment</label>
-                    <div className="flex bg-slate-100 p-0.5 rounded-md">
-                        {['top', 'bottom'].map((align) => (
-                            <button
-                                key={align}
-                                onClick={() => {
-                                    if (setCellConfigs) {
-                                        const currentConfig = cellConfigs[selectedCellIndex] || { text: '', offsetX: 10, offsetY: 10, fontSize: 16, color: '#000000' };
-                                        setCellConfigs({
-                                            ...cellConfigs,
-                                            [selectedCellIndex]: { ...currentConfig, verticalAlign: align as any }
-                                        });
-                                    }
-                                }}
-                                className={`flex-1 text-[10px] uppercase font-bold py-1 rounded-sm transition-colors ${
-                                    (cellConfigs[selectedCellIndex]?.verticalAlign || 'top') === align 
-                                    ? 'bg-white text-slate-900 shadow-sm' 
-                                    : 'text-slate-400 hover:text-slate-600'
-                                }`}
-                            >
-                                {align}
-                            </button>
-                        ))}
+                  {selectedCellIndex < 0 && (
+                    <div className="space-y-2">
+                      <div className="grid grid-cols-2 gap-2">
+                         <div className="space-y-0.5">
+                            <label className="text-[9px] font-bold text-slate-400 uppercase">Banner Position</label>
+                            <div className="flex bg-slate-100 p-0.5 rounded">
+                                {['top', 'bottom'].map((pos) => (
+                                    <button
+                                        key={pos}
+                                        onClick={() => {
+                                            if (setCellConfigs) {
+                                                const currentConfig = cellConfigs[selectedCellIndex] || { text: '', offsetX: 0, offsetY: 0, fontSize: 36, color: '#000000' };
+                                                setCellConfigs({
+                                                    ...cellConfigs,
+                                                    [selectedCellIndex]: { ...currentConfig, verticalAlign: pos as any }
+                                                });
+                                            }
+                                        }}
+                                        className={`flex-1 text-[9px] uppercase font-bold py-0.5 rounded-sm transition-colors ${
+                                            (cellConfigs[selectedCellIndex]?.verticalAlign || 'top') === pos 
+                                            ? 'bg-white text-slate-900 shadow-sm' 
+                                            : 'text-slate-400 hover:text-slate-600'
+                                        }`}
+                                    >
+                                        {pos.toUpperCase()}
+                                    </button>
+                                ))}
+                            </div>
+                         </div>
+                         <div className="space-y-0.5">
+                            <label className="text-[9px] font-bold text-slate-400 uppercase">Area Height (px)</label>
+                            <input 
+                              type="number" 
+                              placeholder={cellConfigs[selectedCellIndex]?.overlay ? "Overlay" : "Auto"}
+                              disabled={cellConfigs[selectedCellIndex]?.overlay}
+                              value={cellConfigs[selectedCellIndex]?.bannerHeight ?? ''}
+                              onChange={(e) => {
+                                if (setCellConfigs) {
+                                  const currentConfig = cellConfigs[selectedCellIndex] || { text: '', offsetX: 0, offsetY: 0, fontSize: 36, color: '#000000' };
+                                  setCellConfigs({
+                                    ...cellConfigs,
+                                    [selectedCellIndex]: { ...currentConfig, bannerHeight: parseInt(e.target.value) || undefined }
+                                  });
+                                }
+                              }}
+                              className="w-full text-[10px] px-1.5 py-0.5 bg-slate-50 border border-slate-200 rounded focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:opacity-60 disabled:bg-slate-100"
+                            />
+                         </div>
+                      </div>
+                      <div className="flex items-center gap-1.5 p-1 rounded hover:bg-slate-100/50 transition-colors">
+                        <input
+                          type="checkbox"
+                          id="overlay-checkbox"
+                          checked={cellConfigs[selectedCellIndex]?.overlay || false}
+                          onChange={(e) => {
+                            if (setCellConfigs) {
+                              const currentConfig = cellConfigs[selectedCellIndex] || { text: '', offsetX: 0, offsetY: 0, fontSize: 36, color: '#000000' };
+                              setCellConfigs({
+                                ...cellConfigs,
+                                [selectedCellIndex]: { ...currentConfig, overlay: e.target.checked }
+                              });
+                            }
+                          }}
+                          className="h-3 w-3 rounded text-blue-600 focus:ring-blue-500 border-slate-350 cursor-pointer"
+                        />
+                        <label htmlFor="overlay-checkbox" className="text-[10px] font-medium text-slate-600 cursor-pointer select-none">
+                          不增加图片高度（覆盖模式）
+                        </label>
+                      </div>
                     </div>
-                  </div>
+                  )}
 
-                  <div className="grid grid-cols-2 gap-3">
-                    <div className="space-y-1">
-                      <label className="text-[10px] font-bold text-slate-500 uppercase">Font Size</label>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div className="space-y-0.5">
+                      <label className="text-[9px] font-bold text-slate-400 uppercase">Size</label>
                       <input 
                         type="number" 
                         value={cellConfigs[selectedCellIndex]?.fontSize ?? 16}
@@ -1783,12 +2208,12 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
                             });
                           }
                         }}
-                        className="w-full text-xs px-2 py-1 bg-white border border-slate-200 rounded focus:outline-none focus:ring-1 focus:ring-blue-500"
+                        className="w-full text-[10px] px-1.5 py-0.5 bg-slate-50 border border-slate-200 rounded focus:outline-none focus:ring-1 focus:ring-blue-500"
                       />
                     </div>
-                    <div className="space-y-1">
-                      <label className="text-[10px] font-bold text-slate-500 uppercase">Color</label>
-                      <div className="flex items-center gap-2">
+                    <div className="space-y-0.5">
+                      <label className="text-[9px] font-bold text-slate-400 uppercase">Color</label>
+                      <div className="flex items-center gap-1">
                           <input 
                           type="color" 
                           value={cellConfigs[selectedCellIndex]?.color || '#000000'}
@@ -1801,77 +2226,190 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
                               });
                               }
                           }}
-                          className="w-8 h-8 border border-slate-200 rounded cursor-pointer p-0.5 bg-white shadow-sm"
+                          className="w-6 h-6 border border-slate-200 rounded cursor-pointer p-0.5 bg-white shadow-sm"
                           />
-                          <span className="text-[10px] text-slate-400 font-mono bg-slate-50 px-1.5 py-0.5 rounded border border-slate-100">{cellConfigs[selectedCellIndex]?.color || '#000000'}</span>
+                          <span className="text-[9px] text-slate-400 font-mono bg-slate-50 px-1 py-0.5 rounded border border-slate-100 flex-1 text-center">{cellConfigs[selectedCellIndex]?.color || '#000000'}</span>
                       </div>
                     </div>
                   </div>
-                </div>
+
+                  <div className="space-y-1 pt-1 border-t border-slate-100">
+                    <div className="flex items-center justify-between">
+                      <label className="text-[9px] font-bold text-slate-400 uppercase">Background Color</label>
+                      <button
+                        onClick={() => {
+                          if (setCellConfigs) {
+                            const currentConfig = cellConfigs[selectedCellIndex] || { text: '', offsetX: 10, offsetY: 10, fontSize: 16 };
+                            setCellConfigs({
+                              ...cellConfigs,
+                              [selectedCellIndex]: { 
+                                ...currentConfig, 
+                                bgColor: (currentConfig.bgColor === 'transparent' || !currentConfig.bgColor) ? '#ffffff' : 'transparent'
+                              }
+                            });
+                          }
+                        }}
+                        className="text-[9px] text-blue-600 font-bold hover:underline"
+                      >
+                        {(cellConfigs[selectedCellIndex]?.bgColor === 'transparent' || !cellConfigs[selectedCellIndex]?.bgColor) ? 'Set Color' : 'Set Transparent'}
+                      </button>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      {(cellConfigs[selectedCellIndex]?.bgColor && cellConfigs[selectedCellIndex].bgColor !== 'transparent') ? (
+                        <div className="flex items-center gap-1 flex-1">
+                          <input 
+                            type="color" 
+                            value={cellConfigs[selectedCellIndex]?.bgColor || '#ffffff'}
+                            onChange={(e) => {
+                              if (setCellConfigs) {
+                                const currentConfig = cellConfigs[selectedCellIndex] || { text: '', offsetX: 10, offsetY: 10, fontSize: 16, color: '#000000' };
+                                setCellConfigs({
+                                  ...cellConfigs,
+                                  [selectedCellIndex]: { ...currentConfig, bgColor: e.target.value }
+                                });
+                              }
+                            }}
+                            className="w-6 h-6 border border-slate-200 rounded cursor-pointer p-0.5 bg-white shadow-sm"
+                          />
+                          <span className="text-[9px] text-slate-400 font-mono bg-slate-50 px-1.5 py-0.5 rounded border border-slate-100 flex-1 text-center font-bold">
+                            {cellConfigs[selectedCellIndex]?.bgColor}
+                          </span>
+                        </div>
+                      ) : (
+                        <div className="text-[10px] text-slate-400 italic bg-slate-50 rounded border border-slate-100 flex-1 text-center py-1 font-medium">
+                          Transparent (No background)
+                        </div>
+                      )}
+                    </div>
+                  </div>
               </div>
             </div>
           )}
 
           {/* Panel 1: Configuration */}
           <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm flex flex-col flex-1 min-h-0">
-            <div className="p-4 border-b border-slate-200 flex items-center justify-between bg-white">
-              <h3 className="text-xs font-bold text-slate-900 uppercase tracking-widest">Configuration</h3>
+            <div className="p-2 border-b border-slate-200 flex items-center justify-between bg-white">
+              <h3 className="text-[10px] font-bold text-slate-900 uppercase tracking-widest">Configuration</h3>
             </div>
             
-            <div className="flex-1 overflow-y-auto p-4 space-y-6">
-              <div className="space-y-4">
-                 {/* Visual Config */}
-                 <div className="bg-white p-3 rounded-lg border border-slate-100">
-                   <div className="flex items-center justify-between mb-2">
-                     <label className="text-[10px] font-bold text-slate-600 uppercase tracking-wide">Box Fill Opacity</label>
-                     <span className="text-[10px] font-bold text-slate-900 tabular-nums">{Math.round(boxOpacity * 100)}%</span>
-                   </div>
-                   <div className="p-2 bg-white border border-slate-100 rounded-md">
-                     <input 
-                      type="range" min="0" max="1" step="0.05"
-                      value={boxOpacity}
-                      onChange={(e) => setBoxOpacity(parseFloat(e.target.value))}
-                      className="w-full h-1.5 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-slate-900"
-                     />
-                   </div>
+            <div className="flex-1 overflow-y-auto p-2 space-y-3">
+               {/* Global Rows (Banners) List */}
+               <div className="bg-slate-50 p-2 rounded border border-slate-100 space-y-2">
+                 <div className="flex items-center justify-between">
+                   <label className="text-[9px] font-bold text-slate-500 uppercase">Global Rows / Banners</label>
+                   <button 
+                     onClick={handleAddGlobalRow}
+                     className="text-[9px] text-blue-600 font-bold hover:underline flex items-center gap-0.5"
+                   >
+                     + Add Row
+                   </button>
                  </div>
+                 
+                 {/* List of currently configured banners */}
+                 <div className="space-y-1.5 max-h-[140px] overflow-y-auto pr-1">
+                   {Object.keys(cellConfigs)
+                     .map(key => parseInt(key))
+                     .filter(key => key < 0)
+                     .sort((a,b) => b - a) // Sort descending -1, -2, -3...
+                     .map((key) => {
+                       const conf = cellConfigs[key];
+                       return (
+                         <div key={key} className="flex gap-1 items-center bg-white p-1 rounded border border-slate-150">
+                           <input 
+                             type="text" 
+                             placeholder="Banner text..."
+                             value={conf.text || ''}
+                             onChange={(e) => {
+                               if (setCellConfigs) {
+                                 setCellConfigs({
+                                   ...cellConfigs,
+                                   [key]: { ...conf, text: e.target.value }
+                                 });
+                               }
+                             }}
+                             className="flex-1 text-[9px] px-1 py-0.5 bg-slate-50 border border-slate-150 rounded focus:outline-none"
+                           />
+                           <button
+                             onClick={() => setSelectedCellIndex(key)}
+                             className={`p-0.5 rounded ${selectedCellIndex === key ? 'text-blue-500 bg-blue-50' : 'text-slate-400 hover:text-slate-600 hover:bg-slate-50'}`}
+                             title="Row configuration"
+                           >
+                             <Settings size={10} />
+                           </button>
+                           <button
+                             onClick={() => {
+                               if (setCellConfigs) {
+                                 const nextConfigs = { ...cellConfigs };
+                                 delete nextConfigs[key];
+                                 setCellConfigs(nextConfigs);
+                                 if (selectedCellIndex === key) setSelectedCellIndex(null);
+                               }
+                             }}
+                             className="p-0.5 text-slate-400 hover:text-red-500 rounded hover:bg-red-50"
+                             title="Delete global row"
+                           >
+                             <Trash2 size={10} />
+                           </button>
+                         </div>
+                       );
+                     })}
+                   {Object.keys(cellConfigs).filter(k => parseInt(k) < 0).length === 0 && (
+                     <div className="text-[10px] text-slate-400 italic text-center py-2 bg-white rounded border border-slate-100 border-dashed">
+                       No global rows yet.
+                     </div>
+                   )}
+                 </div>
+               </div>
 
-                 <div className="flex items-center justify-between p-3 bg-white rounded-lg border border-slate-200 shadow-sm">
-                    <div className="flex items-center gap-2">
-                      {showLabels ? <Eye size={16} className="text-slate-900" /> : <EyeOff size={16} className="text-slate-400" />}
-                      <span className="text-xs font-bold text-slate-900 uppercase tracking-tight">Show Labels</span>
+               {/* Visual Config */}
+               <div className="bg-slate-50 p-2 rounded border border-slate-100 space-y-2">
+                 <div className="flex items-center justify-between">
+                   <label className="text-[9px] font-bold text-slate-500 uppercase">Opacity</label>
+                   <span className="text-[9px] font-bold text-slate-900 tabular-nums">{Math.round(boxOpacity * 100)}%</span>
+                 </div>
+                 <input 
+                  type="range" min="0" max="1" step="0.05"
+                  value={boxOpacity}
+                  onChange={(e) => setBoxOpacity(parseFloat(e.target.value))}
+                  className="w-full h-1 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-slate-900 block"
+                 />
+                 
+                 <div className="flex items-center justify-between pt-1">
+                    <div className="flex items-center gap-1.5">
+                      {showLabels ? <Eye size={12} className="text-slate-900" /> : <EyeOff size={12} className="text-slate-400" />}
+                      <span className="text-[9px] font-bold text-slate-500 uppercase">Labels</span>
                     </div>
                     <button 
                       onClick={() => setShowLabels(!showLabels)}
-                      className={`w-10 h-5 rounded-full relative transition-colors duration-200 focus:outline-none ${showLabels ? 'bg-slate-900' : 'bg-slate-200'}`}
+                      className={`w-7 h-3.5 rounded-full relative transition-colors duration-200 focus:outline-none ${showLabels ? 'bg-slate-900' : 'bg-slate-200'}`}
                     >
-                      <div className={`absolute top-1 left-1 bg-white w-3 h-3 rounded-full transition-transform duration-200 ${showLabels ? 'translate-x-5' : 'translate-x-0'}`} />
+                      <div className={`absolute top-0.5 left-0.5 bg-white w-2.5 h-2.5 rounded-full transition-transform duration-200 ${showLabels ? 'translate-x-3.5' : 'translate-x-0'}`} />
                     </button>
                  </div>
-              </div>
+               </div>
 
-              <div className="border-t border-slate-100 pt-4 bg-white">
+              <div className="border-t border-slate-100 pt-2">
                 {selectedBox && selectedProject ? (
-                  <div className="space-y-4 animate-in fade-in slide-in-from-right-2 duration-200 bg-white">
+                  <div className="space-y-2 animate-in fade-in slide-in-from-right-2 duration-200">
                       <div className="flex items-center justify-between">
-                          <h4 className="text-[10px] font-bold text-slate-900 uppercase tracking-wider">Object Properties</h4>
+                          <h4 className="text-[9px] font-bold text-slate-900 uppercase tracking-wider">Object Properties</h4>
                           <div className="flex items-center gap-1">
                               <button 
                               onClick={() => {
                                   if(onRecordHistory) onRecordHistory();
                                   deleteSelectedBox();
                               }}
-                              className="text-red-500 hover:text-red-700 transition-colors p-1 bg-white rounded hover:bg-red-50"
-                              title="Delete object (Del/Backspace)"
+                              className="text-red-500 hover:text-red-700 transition-colors p-0.5 bg-white rounded hover:bg-red-50"
+                              title="Delete"
                               >
-                              <Trash2 size={14} />
+                              <Trash2 size={12} />
                               </button>
                               <button 
                               onClick={() => setSelectedBox(null)}
-                              className="text-slate-400 hover:text-slate-600 transition-colors p-1 bg-white rounded hover:bg-slate-50"
+                              className="text-slate-400 hover:text-slate-600 transition-colors p-0.5 bg-white rounded hover:bg-slate-50"
                               title="Deselect"
                               >
-                              <X size={14} />
+                              <X size={12} />
                               </button>
                           </div>
                       </div>
@@ -1881,10 +2419,10 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
                           const box = selectedProject.boxes.find(b => b.id === selectedBox.boxId);
                           if (!box) return null;
                           return (
-                              <>
-                                  <div className="grid grid-cols-2 gap-3 bg-white">
+                              <div className="space-y-2">
+                                  <div className="grid grid-cols-2 gap-2">
                                       <div className="col-span-2">
-                                          <label className="text-[10px] font-bold text-slate-500 uppercase block mb-1.5">Label</label>
+                                          <label className="text-[9px] font-bold text-slate-400 uppercase block mb-0.5">Label</label>
                                           <input 
                                           type="text" 
                                           value={box.label}
@@ -1892,11 +2430,11 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
                                               if(onRecordHistory) onRecordHistory();
                                               updateBox(selectedBox.projectId, box.id, { label: e.target.value })
                                           }}
-                                          className="w-full px-3 py-2 bg-white text-slate-900 border border-slate-300 rounded-md text-sm focus:ring-1 focus:ring-blue-500 outline-none shadow-sm"
+                                          className="w-full px-1.5 py-1 bg-white text-slate-900 border border-slate-200 rounded text-[10px] focus:ring-1 focus:ring-blue-500 outline-none"
                                           />
                                       </div>
                                       <div className="col-span-2">
-                                          <label className="text-[10px] font-bold text-slate-500 uppercase block mb-1.5">Class ID</label>
+                                          <label className="text-[9px] font-bold text-slate-400 uppercase block mb-0.5">Class ID</label>
                                           <input 
                                           type="number" 
                                           value={box.cls_id}
@@ -1904,25 +2442,37 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
                                               if(onRecordHistory) onRecordHistory();
                                               updateBox(selectedBox.projectId, box.id, { cls_id: parseInt(e.target.value) || 0 })
                                           }}
-                                          className="w-full px-3 py-2 bg-white text-slate-900 border border-slate-300 rounded-md text-sm focus:ring-1 focus:ring-blue-500 outline-none shadow-sm"
+                                          className="w-full px-1.5 py-1 bg-white text-slate-900 border border-slate-200 rounded text-[10px] focus:ring-1 focus:ring-blue-500 outline-none"
                                           />
                                       </div>
                                   </div>
                                   
-                                  <div className="grid grid-cols-2 gap-3 bg-white">
-                                      <div><label className="text-[9px] font-bold text-slate-500 uppercase block mb-1">X1</label><input type="number" value={Math.round(box.coordinate[0])} onChange={(e) => { if(onRecordHistory) onRecordHistory(); const c=[...box.coordinate] as any; c[0]=parseInt(e.target.value); updateBox(selectedBox.projectId, box.id, {coordinate: c})}} className="w-full px-2 py-1.5 border border-slate-300 rounded text-xs outline-none focus:ring-1 focus:ring-blue-500"/></div>
-                                      <div><label className="text-[9px] font-bold text-slate-500 uppercase block mb-1">Y1</label><input type="number" value={Math.round(box.coordinate[1])} onChange={(e) => { if(onRecordHistory) onRecordHistory(); const c=[...box.coordinate] as any; c[1]=parseInt(e.target.value); updateBox(selectedBox.projectId, box.id, {coordinate: c})}} className="w-full px-2 py-1.5 border border-slate-300 rounded text-xs outline-none focus:ring-1 focus:ring-blue-500"/></div>
-                                      <div><label className="text-[9px] font-bold text-slate-500 uppercase block mb-1">X2</label><input type="number" value={Math.round(box.coordinate[2])} onChange={(e) => { if(onRecordHistory) onRecordHistory(); const c=[...box.coordinate] as any; c[2]=parseInt(e.target.value); updateBox(selectedBox.projectId, box.id, {coordinate: c})}} className="w-full px-2 py-1.5 border border-slate-300 rounded text-xs outline-none focus:ring-1 focus:ring-blue-500"/></div>
-                                      <div><label className="text-[9px] font-bold text-slate-500 uppercase block mb-1">Y2</label><input type="number" value={Math.round(box.coordinate[3])} onChange={(e) => { if(onRecordHistory) onRecordHistory(); const c=[...box.coordinate] as any; c[3]=parseInt(e.target.value); updateBox(selectedBox.projectId, box.id, {coordinate: c})}} className="w-full px-2 py-1.5 border border-slate-300 rounded text-xs outline-none focus:ring-1 focus:ring-blue-500"/></div>
+                                  <div className="grid grid-cols-2 gap-2">
+                                      {['X1', 'Y1', 'X2', 'Y2'].map((label, i) => (
+                                        <div key={label}>
+                                          <label className="text-[9px] font-bold text-slate-400 uppercase block mb-0.5">{label}</label>
+                                          <input 
+                                            type="number" 
+                                            value={Math.round(box.coordinate[i])} 
+                                            onChange={(e) => { 
+                                              if(onRecordHistory) onRecordHistory(); 
+                                              const c=[...box.coordinate] as any; 
+                                              c[i]=parseInt(e.target.value); 
+                                              updateBox(selectedBox.projectId, box.id, {coordinate: c})
+                                            }} 
+                                            className="w-full px-1.5 py-0.5 border border-slate-200 rounded text-[10px] outline-none focus:ring-1 focus:ring-blue-500"
+                                          />
+                                        </div>
+                                      ))}
                                   </div>
-                              </>
+                              </div>
                           );
                       })()}
                   </div>
                 ) : (
-                  <div className="h-full flex flex-col items-center justify-center text-center opacity-50 py-8 bg-white">
-                    <Icons.Move size={32} className="text-slate-300 mb-2" />
-                    <p className="text-[11px] text-slate-500 font-semibold px-4">Select an object in any grid cell to edit its properties</p>
+                  <div className="h-full flex flex-col items-center justify-center text-center opacity-50 py-4">
+                    <Icons.Move size={24} className="text-slate-300 mb-1" />
+                    <p className="text-[10px] text-slate-500 font-semibold px-2">Select an object to edit</p>
                   </div>
                 )}
               </div>
@@ -1930,29 +2480,29 @@ const MergeWorkspace: React.FC<MergeWorkspaceProps> = ({
           </div>
 
           {/* Panel 2: Entity List */}
-          <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm flex flex-col h-48 min-h-0">
-            <div className="p-3 border-b border-slate-200 flex items-center justify-between bg-white">
+          <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm flex flex-col h-40 shrink-0 min-h-0">
+            <div className="p-2 border-b border-slate-200 flex items-center justify-between bg-white">
                 <h3 className="text-[10px] font-bold text-slate-900 uppercase tracking-widest">
-                    {selectedProject ? 'Entity List (Current)' : 'Entity List'}
+                    {selectedProject ? 'Entity List' : 'Entities'}
                 </h3>
-                <span className="text-[10px] bg-slate-900 text-white px-1.5 py-0.5 rounded font-bold">
-                    {selectedProject ? selectedProject.boxes.length : '-'}
+                <span className="text-[9px] bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded font-bold border border-slate-200">
+                    {selectedProject ? selectedProject.boxes.length : 0}
                 </span>
             </div>
-            <div className="flex-1 overflow-y-auto bg-slate-50">
+            <div className="flex-1 overflow-y-auto bg-slate-50 p-1 space-y-1">
                 {selectedProject ? (
                     selectedProject.boxes.map((box) => (
                         <div 
                             key={box.id}
                             onClick={() => setSelectedBox({ projectId: selectedProject.id, boxId: box.id })}
-                            className={`flex items-center gap-3 px-3 py-2 cursor-pointer border-l-2 transition-colors ${selectedBox?.boxId === box.id ? 'bg-white border-blue-500 shadow-sm' : 'border-transparent hover:bg-slate-100'}`}
+                            className={`flex items-center gap-2 px-2 py-1.5 cursor-pointer rounded border transition-all ${selectedBox?.boxId === box.id ? 'bg-white border-blue-500 shadow-sm ring-1 ring-blue-100' : 'border-transparent hover:bg-slate-100 hover:border-slate-200'}`}
                         >
-                            <div className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: COLORS[box.cls_id % COLORS.length] }} />
+                            <div className="w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: COLORS[box.cls_id % COLORS.length] }} />
                             <span className={`text-[10px] font-medium flex-1 truncate ${selectedBox?.boxId === box.id ? 'text-slate-900' : 'text-slate-500'}`}>{box.label}</span>
                         </div>
                     ))
                 ) : (
-                    <div className="p-4 text-center text-[10px] text-slate-400 italic">Select an object to view project entities</div>
+                    <div className="p-4 text-center text-[10px] text-slate-400 italic">No selection</div>
                 )}
             </div>
           </div>

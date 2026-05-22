@@ -32,6 +32,9 @@ export interface CellConfig {
   color: string;
   horizontalAlign?: 'left' | 'center' | 'right';
   verticalAlign?: 'top' | 'bottom';
+  bannerHeight?: number;
+  overlay?: boolean;
+  bgColor?: string;
 }
 
 export interface AppState {
